@@ -1,0 +1,9 @@
+[package]
+authors = ["Rick Richardson <rick.richardson@gmail.com>"]
+name = "rocks-cache"
+version = "0.1.0"
+
+[dependencies]
+rmp-serde = "0.13.7"
+rocksdb = "0.8.1"
+serde = "1.0.15"
