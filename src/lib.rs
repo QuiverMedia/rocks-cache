@@ -1,4 +1,55 @@
 
+//! A simple facade over [rocksdb](https://crates.io/crates/rocksdb) which aims to provide TTL expiration, strong
+//! typing, and easier table (column family) support.
+//!
+//! Example
+//! ```rust
+//!
+//! extern crate serde;
+//! extern crate tempdir;
+//!
+//! use serde::{Deserialize, Serialize};
+//! use rocks_cache::{DbBuilder};
+//! use tempdir::TempDir;
+//! use std::collections::HashMap;
+//!
+//! #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+//! struct User {
+//!     name: String,
+//!     props : HashMap<String, String>,
+//!     number: u64,
+//! }
+//!
+//!
+//! let dir = TempDir::new("rocks").unwrap();
+//! let mut idb = DbBuilder::new(dir.path()).unwrap();
+//!
+//! // all tables you plan to use at runtime must me
+//! // called out before `build`;
+//! idb.create_table("user").unwrap();
+//! idb.create_table("some").unwrap();
+//! let db = idb.build();
+//!
+//! // after `build` we get a working table handle
+//! // which can be safely used between threads
+//! let user_tbl = db.get_table("account").unwrap();
+//!
+//! // construct our mascot
+//! let usr = User {
+//!     name: "Odie".to_owned(),
+//!     props: vec![("age", "91"), ("age metric", "dog years"), ("favorite food", "yes")].iter().map(|(a, b)| (a.to_owned(), b.to_owned())).collect(),
+//!     number: 42
+//! };
+//!
+//! // Insert into the db with a ttl of 5 minutes.
+//! user_tbl.put(b"names/john", usr, 300).unwrap();
+//!
+//! // fetch it as the same type we inserted
+//! let retrieved : User = user_tbl.get("names/john").unwrap().unwrap();
+//! assert_eq!(usr, retrieved);
+//!
+//!```
+
 extern crate rocksdb;
 extern crate serde;
 extern crate rmp_serde as rmps;
@@ -9,6 +60,9 @@ extern crate time;
 #[macro_use]
 extern crate serde_derive;
 
+#[cfg(test)]
+extern crate tempdir;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -16,23 +70,41 @@ use std::error::Error as StdError;
 use std::io::Cursor;
 
 pub use serde::{Deserialize, Serialize};
-pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, MergeOperands, Options,
-                  Error as RDBError, CompactionDecision};
-use rocksdb::ColumnFamily;
+pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, Options};
+use rocksdb::{ColumnFamily, CompactionDecision};
 use rmps::{Deserializer, Serializer};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
 
 const HDR_LEN: usize = 8;
 
-pub struct InitDb {
+pub struct DbBuilder {
     pub db: DB,
     tables: Vec<String>,
     opts: Options,
 }
 
-impl InitDb {
-    pub fn new<P: AsRef<Path> + Clone>(path: P) -> Result<Self, Error> {
+impl DbBuilder {
+    /// Construct a new `DbBuilder`
+    ///
+    /// `DbBuilder` is actually a database in its proto form.
+    /// Tables may only be added/removed to the database environment in this stage.
+    /// After you have declared the necessary tables, execute `build()` to
+    /// transform the `DbBuilder` into its executable form.
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.set_compaction_filter("ttl", ttl_filter);
+        DbBuilder::new_opts(path, opts)
+    }
+
+    /// Construct a new `DbBuilder` with `Options`
+    ///
+    /// `DbBuilder` is actually a database in its proto form.
+    /// This exposes a way to set `rocksdb::Options` and pas them in directly.
+    /// Tables may only be added/removed to the database environment in this stage.
+    /// After you have declared the necessary tables, execute `build()` to
+    /// transform the `DbBuilder` into its executable form.
+    pub fn new_opts<P: AsRef<Path>>(path: P, mut opts: Options) -> Result<Self, Error> {
         opts.create_if_missing(true);
         opts.set_compaction_filter("ttl", ttl_filter);
         let cfs = DB::list_cf(&opts, &path).unwrap_or(vec![]);
@@ -40,13 +112,18 @@ impl InitDb {
         let fams: Vec<&str> = cfs.iter().map(|a| a.as_str()).collect();
         let db = DB::open_cf(&opts, &path, &fams)?;
 
-        Ok(InitDb {
+        Ok(DbBuilder {
             db,
             tables: ncfs,
             opts,
         })
     }
 
+    /// Adds a new `Table` to the Datbase environment.
+    ///
+    /// In RocksDB parliance, this is actually a ColumnFamily.
+    /// Multiple ColumnFamily's can actually be written/read atomically
+    /// in a single operation, but this interface doesn't support it yet.
     pub fn create_table(&mut self, name: &str) -> Result<(), Error> {
         if self.tables.iter().any(|t| t == name) {
             Ok(())
@@ -57,7 +134,12 @@ impl InitDb {
         }
     }
 
-    pub fn start(self) -> Db {
+    /// Convert the DbBuilder into a running Db
+    ///
+    /// This function "freezes" the database environment from making any
+    /// changes such as adding and removing tables. It also transforms
+    /// the struct into something that can be safely used in separate threads.
+    pub fn build(self) -> Db {
         let db = Arc::new(self.db);
         let tables: HashMap<String, Table> = self.tables
             .into_iter()
@@ -301,7 +383,7 @@ mod tests {
     use std::cell::RefCell;
     use self::lipsum::{LOREM_IPSUM, LIBER_PRIMUS, MarkovChain};
     use self::quickcheck::{Gen, Arbitrary, StdGen};
-    use self::rand::{thread_rng, Rng};
+    use self::rand::thread_rng;
     use std::thread::sleep;
     use std::time::Duration;
     use super::*;
@@ -364,11 +446,11 @@ mod tests {
     #[test]
     fn it_works() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
-        let mut idb = InitDb::new(dir.path()).unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
 
         idb.create_table("account").unwrap();
         idb.create_table("nums").unwrap();
-        let db = idb.start();
+        let db = idb.build();
 
         let acct_tbl = db.get_table("account").unwrap();
         let _nums_tbl = db.get_table("nums").unwrap();
@@ -395,11 +477,11 @@ mod tests {
     #[test]
     fn it_honors_ttls() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
-        let mut idb = InitDb::new(dir.path()).unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
 
         idb.create_table("account").unwrap();
         idb.create_table("nums").unwrap();
-        let db = idb.start();
+        let db = idb.build();
 
         let acct_tbl = db.get_table("account").unwrap();
         let _nums_tbl = db.get_table("nums").unwrap();
@@ -424,7 +506,7 @@ mod tests {
 
         sleep(Duration::new(5, 0));
 
-        for (k, v) in accts.iter() {
+        for (k, _v) in accts.iter() {
             let newv: Option<Account> = acct_tbl.get(k.as_bytes()).unwrap();
             assert_eq!(newv, None);
         }
