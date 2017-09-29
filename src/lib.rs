@@ -160,6 +160,7 @@ impl DbBuilder {
     }
 }
 
+#[derive(Clone)]
 pub struct Db {
     tables: HashMap<String, Table>,
 }
