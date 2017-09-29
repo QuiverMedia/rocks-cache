@@ -80,6 +80,9 @@ pub struct Table {
     cf: ColumnFamily,
 }
 
+unsafe impl Send for Table {}
+unsafe impl Sync for Table {}
+
 impl Table {
     pub fn get<'de, V>(&self, key: &[u8]) -> Result<Option<V>, Error>
     where
