@@ -4,6 +4,18 @@ name = "rocks-cache"
 version = "0.1.0"
 
 [dependencies]
+byteorder = "1.1.0"
 rmp-serde = "0.13.7"
 rocksdb = "0.8.1"
 serde = "^1.0"
+time = "0.1.38"
+
+[dev-dependencies]
+lipsum = "0.4.0"
+names = "0.11.0"
+quickcheck = "0.4.1"
+rand = "0.3.16"
+rmp-serde = "0.13.7"
+serde = "1.0.15"
+serde_derive = "1.0.15"
+tempdir = "0.3.5"
