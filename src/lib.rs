@@ -251,7 +251,8 @@ impl Table {
     /// Puts a `Serialize` value into the table at the corresponding `key
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
-    pub fn put<'de, V>(&self, key: &[u8], val: V, ttl: i64) -> Result<(), Error>
+    /// If ttl is None, then the record won't expire
+    pub fn put<'de, V>(&self, key: &[u8], val: V, ttl: Option<i64>) -> Result<(), Error>
     where
         V: Serialize + Deserialize<'de>,
     {
@@ -269,7 +270,8 @@ impl Table {
     /// Puts a `Serialize` value into the table at the corresponding `Serialize` key
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
-    pub fn put_mp<'de, K, V>(&self, key: K, val: V, ttl: i64) -> Result<(), Error>
+    /// If ttl is None, then the record won't expire
+    pub fn put_mp<'de, K, V>(&self, key: K, val: V, ttl: Option<i64>) -> Result<(), Error>
     where
         K: Serialize + Deserialize<'de>,
         V: Serialize + Deserialize<'de>,
@@ -289,7 +291,7 @@ impl Table {
     /// Puts a value into the table at the corresponding key
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
-    pub fn put_raw(&self, key: &[u8], val: &[u8], ttl: i64) -> Result<(), Error> {
+    pub fn put_raw(&self, key: &[u8], val: &[u8], ttl: Option<i64>) -> Result<(), Error> {
         let mut vbuf = Vec::<u8>::with_capacity(val.len() + HDR_LEN);
         set_ttl(&mut vbuf, ttl)?;
         vbuf.extend_from_slice(val);
@@ -336,8 +338,13 @@ fn ttl_expired(inbuf: &[u8]) -> Result<bool, Error> {
     Ok(ttl < time::get_time().sec)
 }
 
-fn set_ttl(vbuf: &mut Vec<u8>, ttl: i64) -> Result<(), Error> {
-    let end = time::get_time().sec + ttl;
+fn set_ttl(vbuf: &mut Vec<u8>, ttl: Option<i64>) -> Result<(), Error> {
+
+    let end = if let Some(t) = ttl {
+        time::get_time().sec + t
+    } else {
+        -1
+    };
     vbuf.write_i64::<LittleEndian>(end).map_err(Error::from)
 }
 
@@ -462,7 +469,7 @@ mod tests {
         let accts: BTreeMap<String, Account> = accts.into_iter().collect();
 
         for (k, v) in accts.iter() {
-            acct_tbl.put(k.as_bytes(), v.clone(), 100).unwrap();
+            acct_tbl.put(k.as_bytes(), v.clone(), Some(100)).unwrap();
         }
 
         let mut newaccts = BTreeMap::<String, Account>::new();
@@ -493,7 +500,7 @@ mod tests {
         let accts: BTreeMap<String, Account> = accts.into_iter().collect();
 
         for (k, v) in accts.iter() {
-            acct_tbl.put(k.as_bytes(), v.clone(), 4).unwrap();
+            acct_tbl.put(k.as_bytes(), v.clone(), Some(4)).unwrap();
         }
 
         let mut newaccts = BTreeMap::<String, Account>::new();
