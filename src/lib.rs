@@ -56,12 +56,13 @@ extern crate rmp_serde as rmps;
 extern crate byteorder;
 extern crate time;
 
-#[cfg(test)]
 #[macro_use]
 extern crate serde_derive;
 
 #[cfg(test)]
 extern crate tempdir;
+
+mod merge_ops;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -74,6 +75,7 @@ pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, Options};
 use rocksdb::{ColumnFamily, CompactionDecision};
 use rmps::{Deserializer, Serializer};
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
+pub use merge_ops::collection;
 
 const HDR_LEN: usize = 8;
 
