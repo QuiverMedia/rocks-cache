@@ -6,11 +6,11 @@ version = "0.1.0"
 [dependencies]
 byteorder = "1.1.0"
 rmp-serde = "0.13.7"
-rocksdb = "0.8.1"
 serde = "^1.0"
 serde_derive = "^1.0"
 tempdir = "0.3.5"
 time = "0.1.38"
+rocksdb = { git = "https://github.com/rrichardson/rust-rocksdb" }
 
 [dev-dependencies]
 lipsum = "0.4.0"
