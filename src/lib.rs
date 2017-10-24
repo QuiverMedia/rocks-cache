@@ -1,4 +1,3 @@
-
 //! A simple facade over [rocksdb](https://crates.io/crates/rocksdb) which aims to provide TTL expiration, strong
 //! typing, and easier table (column family) support.
 //!
@@ -52,9 +51,12 @@
 
 extern crate rocksdb;
 extern crate serde;
-extern crate rmp_serde as rmps;
+extern crate bincode;
 extern crate byteorder;
 extern crate time;
+
+#[macro_use]
+extern crate log;
 
 #[macro_use]
 extern crate serde_derive;
@@ -62,37 +64,39 @@ extern crate serde_derive;
 #[cfg(test)]
 extern crate tempdir;
 
-mod merge_ops;
+mod collections;
+mod error;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{PathBuf};
 use std::sync::Arc;
-use std::error::Error as StdError;
-use std::io::Cursor;
 
-pub use serde::{Deserialize, Serialize};
+pub use error::Error;
+pub use collections::{ Kv, Set, Map, List, ttl_filter };
 pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, Options};
-use rocksdb::{ColumnFamily, CompactionDecision};
-use rmps::{Deserializer, Serializer};
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-pub use merge_ops::collection;
+use rocksdb::{ColumnFamilyDescriptor, CompactionDecision};
 
-const HDR_LEN: usize = 8;
+use serde::{Serialize};
+use serde::de::DeserializeOwned;
+
 
 pub struct DbBuilder {
-    pub db: DB,
-    tables: Vec<String>,
+    kvs: Vec<ColumnFamilyDescriptor>,
+    sets: Vec<ColumnFamilyDescriptor>,
+    maps: Vec<ColumnFamilyDescriptor>,
+    lists: Vec<ColumnFamilyDescriptor>,
     opts: Options,
+    path: PathBuf,
 }
 
 impl DbBuilder {
     /// Construct a new `DbBuilder`
     ///
     /// `DbBuilder` is actually a database in its proto form.
-    /// Tables may only be added/removed to the database environment in this stage.
+    /// Collections may only be added/removed to the database environment in this stage.
     /// After you have declared the necessary tables, execute `build()` to
     /// transform the `DbBuilder` into its executable form.
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.set_compaction_filter("ttl", ttl_filter);
@@ -103,35 +107,106 @@ impl DbBuilder {
     ///
     /// `DbBuilder` is actually a database in its proto form.
     /// This exposes a way to set `rocksdb::Options` and pas them in directly.
-    /// Tables may only be added/removed to the database environment in this stage.
+    /// Collections may only be added/removed to the database environment in this stage.
     /// After you have declared the necessary tables, execute `build()` to
     /// transform the `DbBuilder` into its executable form.
-    pub fn new_opts<P: AsRef<Path>>(path: P, mut opts: Options) -> Result<Self, Error> {
-        opts.create_if_missing(true);
-        opts.set_compaction_filter("ttl", ttl_filter);
-        let cfs = DB::list_cf(&opts, &path).unwrap_or(vec![]);
-        let ncfs = cfs.clone();
-        let fams: Vec<&str> = cfs.iter().map(|a| a.as_str()).collect();
-        let db = DB::open_cf(&opts, &path, &fams)?;
+    pub fn new_opts<P: Into<PathBuf>>(path: P, opts: Options) -> Result<Self, Error> {
+        let kvs = Vec::new();
+        let sets = Vec::new();
+        let maps = Vec::new();
+        let lists = Vec::new();
 
         Ok(DbBuilder {
-            db,
-            tables: ncfs,
+            kvs,
+            sets,
+            maps,
+            lists,
             opts,
+            path: path.into(),
         })
     }
 
-    /// Adds a new `Table` to the Datbase environment.
+    /// Adds a new `KV` generic storage table to the Database environment.
     ///
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_table(&mut self, name: &str) -> Result<(), Error> {
-        if self.tables.iter().any(|t| t == name) {
+    pub fn create_kv(&mut self, name: &str) -> Result<(), Error> {
+
+        let fullname = format!("kvs_{}", name);
+        if self.kvs.iter().any(|t| t.name().eq(&fullname)) {
             Ok(())
         } else {
-            self.db.create_cf(name, &self.opts)?;
-            self.tables.push(name.to_owned());
+            let mut opts = Options::default();
+            opts.set_compaction_filter("ttl", ttl_filter);
+            let cfd = ColumnFamilyDescriptor::new(fullname, opts);
+            self.kvs.push(cfd);
+            Ok(())
+        }
+    }
+    
+    /// Adds a new `Set` collection to the Database environment.
+    ///
+    /// In RocksDB parliance, this is actually a ColumnFamily.
+    /// Multiple ColumnFamily's can actually be written/read atomically
+    /// in a single operation, but this interface doesn't support it yet.
+    pub fn create_set<K>(&mut self, name: &str) -> Result<(), Error>
+    where K : Serialize + DeserializeOwned + Ord + Clone
+    {
+
+        let fullname = format!("set_{}", name);
+        if self.sets.iter().any(|t| t.name().eq(&fullname)) {
+            Ok(())
+        } else {
+            let mut opts = Options::default();
+            opts.set_compaction_filter("ttl", ttl_filter);
+            opts.set_merge_operator("set_merge", Set::full_merge::<K>, Some(Set::partial_merge::<K>));
+            let cfd = ColumnFamilyDescriptor::new(fullname, opts);
+            self.sets.push(cfd);
+            Ok(())
+        }
+    }
+    
+    /// Adds a new `Map` collection to the Database environment.
+    ///
+    /// In RocksDB parliance, this is actually a ColumnFamily.
+    /// Multiple ColumnFamily's can actually be written/read atomically
+    /// in a single operation, but this interface doesn't support it yet.
+    pub fn create_map<K, V>(&mut self, name: &str) -> Result<(), Error> 
+    where K : Serialize + DeserializeOwned + Ord + Clone,
+          V :  Serialize + DeserializeOwned + Ord + Clone,
+    {
+        let fullname = format!("map_{}", name);
+        if self.maps.iter().any(|t| t.name().eq(&fullname)) {
+            Ok(())
+        } else {
+            let mut opts = Options::default();
+            opts.set_compaction_filter("ttl", ttl_filter);
+            opts.set_merge_operator("map_merge", Map::full_merge::<K, V>, Some(Map::partial_merge::<K, V>));
+            let cfd = ColumnFamilyDescriptor::new(fullname, opts);
+            self.maps.push(cfd);
+            Ok(())
+        }
+    }
+   
+
+    /// Adds a new `List` collection to the Database environment.
+    ///
+    /// In RocksDB parliance, this is actually a ColumnFamily.
+    /// Multiple ColumnFamily's can actually be written/read atomically
+    /// in a single operation, but this interface doesn't support it yet.
+    pub fn create_list<V>(&mut self, name: &str) -> Result<(), Error> 
+    where V :  Serialize + DeserializeOwned + Ord + Clone,
+    {
+        let fullname = format!("lis_{}", name);
+        if self.lists.iter().any(|t| t.name().eq(&fullname)) {
+            Ok(())
+        } else {
+            let mut opts = Options::default();
+            opts.set_compaction_filter("ttl", ttl_filter);
+            opts.set_merge_operator("list_merge", List::full_merge::<V>, Some(List::partial_merge::<V>));
+            let cfd = ColumnFamilyDescriptor::new(fullname, opts);
+            self.maps.push(cfd);
             Ok(())
         }
     }
@@ -141,242 +216,60 @@ impl DbBuilder {
     /// This function "freezes" the database environment from making any
     /// changes such as adding and removing tables. It also transforms
     /// the struct into something that can be safely used in separate threads.
-    pub fn build(self) -> Db {
-        let db = Arc::new(self.db);
-        let tables: HashMap<String, Table> = self.tables
-            .into_iter()
-            .map(|cf| {
-                db.cf_handle(cf.as_str()).map(|f| {
-                    (
-                        cf,
-                        Table {
-                            cf: f,
-                            db: db.clone(),
-                        },
-                    )
-                })
-            })
-            .flat_map(|cf| cf.into_iter())
+    pub fn build(self) -> Result<Db, Error> {
+        let mut kvs = HashMap::<String, Kv>::new();
+        let mut sets = HashMap::<String, Set>::new();
+        let mut  maps = HashMap::<String, Map>::new();
+        let mut lists = HashMap::<String, List>::new();
+
+        let cfds : Vec<ColumnFamilyDescriptor> = self.kvs.into_iter()
+            .chain(self.sets.into_iter())
+            .chain(self.maps.into_iter())
+            .chain(self.lists.into_iter())
             .collect();
-        Db { tables }
+
+        let names : Vec<String> = cfds.iter().map(|cf| cf.name().clone()).collect();
+
+        let db = Arc::new(DB::open_cf_descriptors(&self.opts, self.path, cfds)?);
+
+        for name in names {
+            match &name[..3] {
+                "kvs" => { if let Some(cf) = db.cf_handle(name.as_str()) { kvs.insert(name[4..].to_string(), Kv::new(db.clone(), cf)); } },
+                "set" => { if let Some(cf) = db.cf_handle(name.as_str()) { sets.insert(name[4..].to_string(), Set::new(db.clone(), cf)); } },
+                "map" => { if let Some(cf) = db.cf_handle(name.as_str()) { maps.insert(name[4..].to_string(), Map::new(db.clone(), cf)); } },
+                "lis" => { if let Some(cf) = db.cf_handle(name.as_str()) { lists.insert(name[4..].to_string(), List::new(db.clone(), cf)); } },
+                name => { if let Some(cf) = db.cf_handle(name) { kvs.insert(name.to_string(), Kv::new(db.clone(), cf)); } },
+            }
+        }
+
+        Ok(Db { kvs, maps, sets, lists })
     }
 }
 
 #[derive(Clone)]
 pub struct Db {
-    tables: HashMap<String, Table>,
+    kvs: HashMap<String, Kv>,
+    maps: HashMap<String, Map>,
+    sets: HashMap<String, Set>,
+    lists: HashMap<String, List>,
 }
 
 impl Db {
-    pub fn get_table(&self, name: &str) -> Option<Table> {
-        self.tables.get(name).map(|t| t.clone())
+    pub fn get_kv(&self, name: &str) -> Option<Kv> {
+        self.kvs.get(name).map(|t| t.clone())
+    }
+    pub fn get_set(&self, name: &str) -> Option<Set> {
+        self.sets.get(name).map(|t| t.clone())
+    }
+    pub fn get_map(&self, name: &str) -> Option<Map> {
+        self.maps.get(name).map(|t| t.clone())
+    }
+    pub fn get_list(&self, name: &str) -> Option<List> {
+        self.lists.get(name).map(|t| t.clone())
     }
 }
 
-#[derive(Clone)]
-pub struct Table {
-    db: Arc<DB>,
-    cf: ColumnFamily,
-}
 
-unsafe impl Send for Table {}
-unsafe impl Sync for Table {}
-
-impl Table {
-    /// get
-    ///
-    /// Get a `Serialize` value at the corresponding key
-    /// if the ttl for the record is expired, Ok(None) is returned
-    /// If there is no value found for the key,  Ok(None) is returned
-    pub fn get<'de, V>(&self, key: &[u8]) -> Result<Option<V>, Error>
-    where
-        V: Serialize + Deserialize<'de>,
-    {
-        let res = self.db.get_cf(self.cf, key)?;
-        if let Some(inbuf) = res {
-            //println!("{:?}, {:?}", key, inbuf[..]);
-            if ttl_expired(&inbuf[..])? {
-                return Ok(None);
-            }
-            let mut de = Deserializer::new(&inbuf[HDR_LEN..]);
-            let v: V = Deserialize::deserialize(&mut de).map_err(Error::from)?;
-            Ok(Some(v))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// get_mp
-    ///
-    /// Get a `Serialize` value at the corresponding `Serialize` key
-    /// if the ttl for the record is expired, Ok(None) is returned
-    /// If there is no value found for the key,  Ok(None) is returned
-    pub fn get_mp<'de, K, V>(&self, key: K) -> Result<Option<V>, Error>
-    where
-        K: Serialize + Deserialize<'de>,
-        V: Serialize + Deserialize<'de>,
-    {
-        let mut kbuf = Vec::<u8>::new();
-        key.serialize(&mut Serializer::new(&mut kbuf))?;
-        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
-        if let Some(inbuf) = res {
-            if ttl_expired(&inbuf[..])? {
-                return Ok(None);
-            }
-            let mut de = Deserializer::new(&inbuf[HDR_LEN..]);
-            let v: V = Deserialize::deserialize(&mut de).map_err(Error::from)?;
-            Ok(Some(v))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// get_raw
-    ///
-    /// Get a value at the corresponding key
-    /// if the ttl for the record is expired, Ok(None) is returned
-    /// If there is no value found for the key,  Ok(None) is returned
-    pub fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        let res = self.db.get_cf(self.cf, key).map_err(Error::from)?;
-        if let Some(inbuf) = res {
-            if ttl_expired(&inbuf[..])? {
-                return Ok(None);
-            }
-            Ok(Some(inbuf[HDR_LEN..].to_vec()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// put
-    ///
-    /// Puts a `Serialize` value into the table at the corresponding `key
-    /// The value will expire and be removed from the table at ttl seconds from
-    /// the function call
-    /// If ttl is None, then the record won't expire
-    pub fn put<'de, V>(&self, key: &[u8], val: V, ttl: Option<i64>) -> Result<(), Error>
-    where
-        V: Serialize + Deserialize<'de>,
-    {
-        let mut vbuf = Vec::<u8>::new();
-        set_ttl(&mut vbuf, ttl)?;
-        val.serialize(&mut Serializer::new(&mut vbuf))?;
-        //println!("{:?}, {:?}", key, vbuf);
-        self.db.put_cf(self.cf, key, vbuf.as_slice()).map_err(
-            Error::from,
-        )
-    }
-
-    /// put_raw
-    ///
-    /// Puts a `Serialize` value into the table at the corresponding `Serialize` key
-    /// The value will expire and be removed from the table at ttl seconds from
-    /// the function call
-    /// If ttl is None, then the record won't expire
-    pub fn put_mp<'de, K, V>(&self, key: K, val: V, ttl: Option<i64>) -> Result<(), Error>
-    where
-        K: Serialize + Deserialize<'de>,
-        V: Serialize + Deserialize<'de>,
-    {
-        let mut kbuf = Vec::<u8>::new();
-        let mut vbuf = Vec::<u8>::new();
-        key.serialize(&mut Serializer::new(&mut kbuf))?;
-        set_ttl(&mut vbuf, ttl)?;
-        val.serialize(&mut Serializer::new(&mut vbuf))?;
-        self.db
-            .put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
-            .map_err(Error::from)
-    }
-
-    /// put_raw
-    ///
-    /// Puts a value into the table at the corresponding key
-    /// The value will expire and be removed from the table at ttl seconds from
-    /// the function call
-    pub fn put_raw(&self, key: &[u8], val: &[u8], ttl: Option<i64>) -> Result<(), Error> {
-        let mut vbuf = Vec::<u8>::with_capacity(val.len() + HDR_LEN);
-        set_ttl(&mut vbuf, ttl)?;
-        vbuf.extend_from_slice(val);
-        self.db.put_cf(self.cf, key, val).map_err(Error::from)
-    }
-
-    /// delete
-    ///
-    /// deletes a record corresponding to the supplied key
-    pub fn delete(&self, key: &[u8]) -> Result<(), Error> {
-        self.db.delete_cf(self.cf, key).map_err(Error::from)
-    }
-
-    /// delete_mp
-    ///
-    /// delete's a record using a key that is a Serialize type
-    pub fn delete_mp<'de, K, V>(&self, key: K) -> Result<(), Error>
-    where
-        K: Serialize + Deserialize<'de>,
-    {
-        let mut kbuf = Vec::<u8>::new();
-        key.serialize(&mut Serializer::new(&mut kbuf))?;
-        self.db.delete_cf(self.cf, kbuf.as_slice()).map_err(
-            Error::from,
-        )
-    }
-
-    /// iter
-    /// XXX TODO
-    /// This iterator doesn't handle the 8 byte timestamp
-    /// preceeding all values, so you must filter it out yourself.
-    ///
-    /// Iterates through the table (or a subrange of the table)
-    /// in the manner specified
-    pub fn iter(&self, mode: IteratorMode) -> Result<DBIterator, Error> {
-        self.db.iterator_cf(self.cf, mode).map_err(Error::from)
-    }
-}
-
-fn ttl_expired(inbuf: &[u8]) -> Result<bool, Error> {
-    let ttl = {
-        Cursor::new(inbuf).read_i64::<LittleEndian>()?
-    };
-    Ok(ttl < time::get_time().sec)
-}
-
-fn set_ttl(vbuf: &mut Vec<u8>, ttl: Option<i64>) -> Result<(), Error> {
-
-    let end = if let Some(t) = ttl {
-        time::get_time().sec + t
-    } else {
-        -1
-    };
-    vbuf.write_i64::<LittleEndian>(end).map_err(Error::from)
-}
-
-fn ttl_filter(_level: u32, _key: &[u8], value: &[u8]) -> CompactionDecision {
-    use CompactionDecision::*;
-    match ttl_expired(value) {
-        Ok(true) => Keep,
-        Ok(false) => Remove,
-        Err(_) => Keep,
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Error {
-    pub description: String,
-}
-
-/* 
-impl StdError for Error {
-    fn description(&self) -> &str {
-        self.description.as_str()
-    }
-}
-*/
-
-impl<'a, E: StdError + 'a> From<E> for Error {
-    fn from(e: E) -> Error {
-        Error { description: e.description().to_owned() }
-    }
-}
 
 
 #[cfg(test)]
