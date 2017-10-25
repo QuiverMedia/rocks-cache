@@ -446,4 +446,3 @@ pub fn ttl_filter(_level: u32, _key: &[u8], value: &[u8]) -> CompactionDecision 
     }
 }
 
-

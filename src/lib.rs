@@ -25,13 +25,13 @@
 //!
 //! // all tables you plan to use at runtime must me
 //! // called out before `build`;
-//! idb.create_table("user").unwrap();
-//! idb.create_table("some").unwrap();
+//! idb.create_kv("user").unwrap();
+//! idb.create_kv("some").unwrap();
 //! let db = idb.build();
 //!
 //! // after `build` we get a working table handle
 //! // which can be safely used between threads
-//! let user_tbl = db.get_table("account").unwrap();
+//! let user_tbl = db.get_kv("account").unwrap();
 //!
 //! // construct our mascot
 //! let usr = User {
@@ -99,6 +99,7 @@ impl DbBuilder {
     pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
         opts.set_compaction_filter("ttl", ttl_filter);
         DbBuilder::new_opts(path, opts)
     }
@@ -229,11 +230,11 @@ impl DbBuilder {
             .collect();
 
         let names : Vec<String> = cfds.iter().map(|cf| cf.name().clone()).collect();
-
         let db = Arc::new(DB::open_cf_descriptors(&self.opts, self.path, cfds)?);
 
         for name in names {
-            match &name[..4] {
+            println!("{} -- {}", &name[..3], &name[4..]);
+            match &name[..3] {
                 "kvs" => { if let Some(cf) = db.cf_handle(name.as_str()) { kvs.insert(name[4..].to_string(), cf); } },
                 "set" => { if let Some(cf) = db.cf_handle(name.as_str()) { sets.insert(name[4..].to_string(), cf); } },
                 "map" => { if let Some(cf) = db.cf_handle(name.as_str()) { maps.insert(name[4..].to_string(), cf); } },
@@ -359,12 +360,12 @@ mod tests {
         let dir = tempdir::TempDir::new("rocks").unwrap();
         let mut idb = DbBuilder::new(dir.path()).unwrap();
 
-        idb.create_table("account").unwrap();
-        idb.create_table("nums").unwrap();
-        let db = idb.build();
+        idb.create_kv("account").unwrap();
+        idb.create_kv("nums").unwrap();
+        let db = idb.build().unwrap();
 
-        let acct_tbl = db.get_table("account").unwrap();
-        let _nums_tbl = db.get_table("nums").unwrap();
+        let acct_tbl = db.get_kv("account").unwrap();
+        let _nums_tbl = db.get_kv("nums").unwrap();
 
         let mut gen = StdGen::new(thread_rng(), 1000);
 
@@ -390,22 +391,25 @@ mod tests {
         let dir = tempdir::TempDir::new("rocks").unwrap();
         let mut idb = DbBuilder::new(dir.path()).unwrap();
 
-        idb.create_table("account").unwrap();
-        idb.create_table("nums").unwrap();
-        let db = idb.build();
+        idb.create_kv("account").unwrap();
+        idb.create_kv("nums").unwrap();
+        let db = idb.build().unwrap();
 
-        let acct_tbl = db.get_table("account").unwrap();
-        let _nums_tbl = db.get_table("nums").unwrap();
+        println!("Getting account");
+        let acct_tbl = db.get_kv("account").unwrap();
+        let _nums_tbl = db.get_kv("nums").unwrap();
 
         let mut gen = StdGen::new(thread_rng(), 100);
 
         let accts: Vec<(String, Account)> = Arbitrary::arbitrary(&mut gen);
         let accts: BTreeMap<String, Account> = accts.into_iter().collect();
 
+        println!("Putting abytes");
         for (k, v) in accts.iter() {
             acct_tbl.put(k.as_bytes(), v.clone(), Some(4)).unwrap();
         }
 
+        println!("Getting abytes");
         let mut newaccts = BTreeMap::<String, Account>::new();
         for (k, v) in accts.iter() {
             let newv = acct_tbl.get(k.as_bytes()).unwrap().unwrap();
@@ -422,4 +426,9 @@ mod tests {
             assert_eq!(newv, None);
         }
     }
+/*
+    #[test]
+    fn it_sets() {
+    }
+    */
 }
