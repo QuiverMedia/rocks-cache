@@ -74,7 +74,7 @@ use std::sync::Arc;
 pub use error::Error;
 pub use collections::{ Kv, Set, Map, List, ttl_filter };
 pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, Options};
-use rocksdb::{ColumnFamilyDescriptor, CompactionDecision};
+use rocksdb::{ColumnFamilyDescriptor, ColumnFamily, CompactionDecision};
 
 use serde::{Serialize};
 use serde::de::DeserializeOwned;
@@ -160,7 +160,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("set_merge", Set::full_merge::<K>, Some(Set::partial_merge::<K>));
+            opts.set_merge_operator("set_merge", Set::<K>::full_merge, Some(Set::<K>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.sets.push(cfd);
             Ok(())
@@ -182,7 +182,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("map_merge", Map::full_merge::<K, V>, Some(Map::partial_merge::<K, V>));
+            opts.set_merge_operator("map_merge", Map::<K,V>::full_merge, Some(Map::<K, V>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
@@ -204,7 +204,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("list_merge", List::full_merge::<V>, Some(List::partial_merge::<V>));
+            opts.set_merge_operator("list_merge", List::<V>::full_merge, Some(List::<V>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
@@ -217,10 +217,10 @@ impl DbBuilder {
     /// changes such as adding and removing tables. It also transforms
     /// the struct into something that can be safely used in separate threads.
     pub fn build(self) -> Result<Db, Error> {
-        let mut kvs = HashMap::<String, Kv>::new();
-        let mut sets = HashMap::<String, Set>::new();
-        let mut  maps = HashMap::<String, Map>::new();
-        let mut lists = HashMap::<String, List>::new();
+        let mut kvs = HashMap::<String, ColumnFamily>::new();
+        let mut sets = HashMap::<String, ColumnFamily>::new();
+        let mut  maps = HashMap::<String, ColumnFamily>::new();
+        let mut lists = HashMap::<String, ColumnFamily>::new();
 
         let cfds : Vec<ColumnFamilyDescriptor> = self.kvs.into_iter()
             .chain(self.sets.into_iter())
@@ -233,39 +233,47 @@ impl DbBuilder {
         let db = Arc::new(DB::open_cf_descriptors(&self.opts, self.path, cfds)?);
 
         for name in names {
-            match &name[..3] {
-                "kvs" => { if let Some(cf) = db.cf_handle(name.as_str()) { kvs.insert(name[4..].to_string(), Kv::new(db.clone(), cf)); } },
-                "set" => { if let Some(cf) = db.cf_handle(name.as_str()) { sets.insert(name[4..].to_string(), Set::new(db.clone(), cf)); } },
-                "map" => { if let Some(cf) = db.cf_handle(name.as_str()) { maps.insert(name[4..].to_string(), Map::new(db.clone(), cf)); } },
-                "lis" => { if let Some(cf) = db.cf_handle(name.as_str()) { lists.insert(name[4..].to_string(), List::new(db.clone(), cf)); } },
-                name => { if let Some(cf) = db.cf_handle(name) { kvs.insert(name.to_string(), Kv::new(db.clone(), cf)); } },
+            match &name[..4] {
+                "kvs" => { if let Some(cf) = db.cf_handle(name.as_str()) { kvs.insert(name[4..].to_string(), cf); } },
+                "set" => { if let Some(cf) = db.cf_handle(name.as_str()) { sets.insert(name[4..].to_string(), cf); } },
+                "map" => { if let Some(cf) = db.cf_handle(name.as_str()) { maps.insert(name[4..].to_string(), cf); } },
+                "lis" => { if let Some(cf) = db.cf_handle(name.as_str()) { lists.insert(name[4..].to_string(), cf); } },
+                name => { if let Some(cf) = db.cf_handle(name) { kvs.insert(name.to_string(), cf); } },
             }
         }
 
-        Ok(Db { kvs, maps, sets, lists })
+        Ok(Db { db, kvs, maps, sets, lists })
     }
 }
 
 #[derive(Clone)]
 pub struct Db {
-    kvs: HashMap<String, Kv>,
-    maps: HashMap<String, Map>,
-    sets: HashMap<String, Set>,
-    lists: HashMap<String, List>,
+    db: Arc<DB>,
+    kvs: HashMap<String, ColumnFamily>,
+    maps: HashMap<String, ColumnFamily>,
+    sets: HashMap<String, ColumnFamily>,
+    lists: HashMap<String, ColumnFamily>,
 }
 
 impl Db {
     pub fn get_kv(&self, name: &str) -> Option<Kv> {
-        self.kvs.get(name).map(|t| t.clone())
+        self.kvs.get(name).map(|cf| Kv::new(self.db.clone(), cf.clone()))
     }
-    pub fn get_set(&self, name: &str) -> Option<Set> {
-        self.sets.get(name).map(|t| t.clone())
+    pub fn get_set<K>(&self, name: &str) -> Option<Set<K>>
+        where K : Serialize + DeserializeOwned + Ord + Clone
+    {
+        self.sets.get(name).map(|cf| Set::<K>::new(self.db.clone(), cf.clone()))
     }
-    pub fn get_map(&self, name: &str) -> Option<Map> {
-        self.maps.get(name).map(|t| t.clone())
+    pub fn get_map<K,V>(&self, name: &str) -> Option<Map<K,V>>
+        where K : Serialize + DeserializeOwned + Ord + Clone,
+              V : Serialize + DeserializeOwned + Ord + Clone,
+    {
+        self.sets.get(name).map(|cf| Map::<K,V>::new(self.db.clone(), cf.clone()))
     }
-    pub fn get_list(&self, name: &str) -> Option<List> {
-        self.lists.get(name).map(|t| t.clone())
+    pub fn get_list<V>(&self, name: &str) -> Option<List<V>>
+        where V : Serialize + DeserializeOwned + Ord + Clone,
+    {
+        self.sets.get(name).map(|cf| List::<V>::new(self.db.clone(), cf.clone()))
     }
 }
 
