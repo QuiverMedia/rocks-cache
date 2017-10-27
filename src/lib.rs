@@ -151,8 +151,9 @@ impl DbBuilder {
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_set<K>(&mut self, name: &str) -> Result<(), Error>
-    where K : Serialize + DeserializeOwned + Ord + Clone
+    pub fn create_set<K,T>(&mut self, name: &str) -> Result<(), Error>
+    where K : Serialize + DeserializeOwned + Ord + Clone,
+          T : Serialize + DeserializeOwned + Ord + Clone,
     {
 
         let fullname = format!("set_{}", name);
@@ -161,7 +162,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("set_merge", Set::<K>::full_merge, Some(Set::<K>::partial_merge));
+            opts.set_merge_operator("set_merge", Set::<K,T>::full_merge, Some(Set::<K,T>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.sets.push(cfd);
             Ok(())
@@ -173,8 +174,9 @@ impl DbBuilder {
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_map<K, V>(&mut self, name: &str) -> Result<(), Error> 
+    pub fn create_map<K,U,V>(&mut self, name: &str) -> Result<(), Error> 
     where K : Serialize + DeserializeOwned + Ord + Clone,
+          U :  Serialize + DeserializeOwned + Ord + Clone,
           V :  Serialize + DeserializeOwned + Ord + Clone,
     {
         let fullname = format!("map_{}", name);
@@ -183,7 +185,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("map_merge", Map::<K,V>::full_merge, Some(Map::<K, V>::partial_merge));
+            opts.set_merge_operator("map_merge", Map::<K,U,V>::full_merge, Some(Map::<K,U,V>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
@@ -196,8 +198,9 @@ impl DbBuilder {
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_list<V>(&mut self, name: &str) -> Result<(), Error> 
-    where V :  Serialize + DeserializeOwned + Ord + Clone,
+    pub fn create_list<K,T>(&mut self, name: &str) -> Result<(), Error> 
+    where K :  Serialize + DeserializeOwned + Ord + Clone,
+          T :  Serialize + DeserializeOwned + Ord + Clone,
     {
         let fullname = format!("lis_{}", name);
         if self.lists.iter().any(|t| t.name().eq(&fullname)) {
@@ -205,7 +208,7 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("list_merge", List::<V>::full_merge, Some(List::<V>::partial_merge));
+            opts.set_merge_operator("list_merge", List::<K,T>::full_merge, Some(List::<K,T>::partial_merge));
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
@@ -260,21 +263,24 @@ impl Db {
     pub fn get_kv(&self, name: &str) -> Option<Kv> {
         self.kvs.get(name).map(|cf| Kv::new(self.db.clone(), cf.clone()))
     }
-    pub fn get_set<K>(&self, name: &str) -> Option<Set<K>>
-        where K : Serialize + DeserializeOwned + Ord + Clone
-    {
-        self.sets.get(name).map(|cf| Set::<K>::new(self.db.clone(), cf.clone()))
-    }
-    pub fn get_map<K,V>(&self, name: &str) -> Option<Map<K,V>>
+    pub fn get_set<K,T>(&self, name: &str) -> Option<Set<K,T>>
         where K : Serialize + DeserializeOwned + Ord + Clone,
+              T : Serialize + DeserializeOwned + Ord + Clone,
+    {
+        self.sets.get(name).map(|cf| Set::<K,T>::new(self.db.clone(), cf.clone()))
+    }
+    pub fn get_map<K,U,V>(&self, name: &str) -> Option<Map<K,U,V>>
+        where K : Serialize + DeserializeOwned + Ord + Clone,
+              U : Serialize + DeserializeOwned + Ord + Clone,
               V : Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.sets.get(name).map(|cf| Map::<K,V>::new(self.db.clone(), cf.clone()))
+        self.sets.get(name).map(|cf| Map::<K,U,V>::new(self.db.clone(), cf.clone()))
     }
-    pub fn get_list<V>(&self, name: &str) -> Option<List<V>>
-        where V : Serialize + DeserializeOwned + Ord + Clone,
+    pub fn get_list<K,T>(&self, name: &str) -> Option<List<K,T>>
+        where K : Serialize + DeserializeOwned + Ord + Clone,
+              T : Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.sets.get(name).map(|cf| List::<V>::new(self.db.clone(), cf.clone()))
+        self.sets.get(name).map(|cf| List::<K,T>::new(self.db.clone(), cf.clone()))
     }
 }
 
@@ -354,7 +360,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn it_works() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
@@ -426,9 +431,37 @@ mod tests {
             assert_eq!(newv, None);
         }
     }
-/*
+
     #[test]
     fn it_sets() {
+        let dir = tempdir::TempDir::new("rocks").unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
+
+        idb.create_set::<String, String>("latin").unwrap();
+        let db = idb.build().unwrap();
+        let key = "key1".to_string();
+        println!("Getting set");
+        let tbl = db.get_set::<String, String>("latin").unwrap();
+
+        let mut stuff = 
+            LOREM2.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        tbl.create(&key, &stuff, None).unwrap();
+       
+        stuff.sort();
+        let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
+
+        assert_eq!(results, stuff);
+
+        for v in stuff.iter() {
+            tbl.insert(&key, v).unwrap();
+        }
+        
+        let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
+
+        assert_eq!(results, stuff);
+
     }
-    */
 }

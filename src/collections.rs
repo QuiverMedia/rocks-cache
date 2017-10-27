@@ -3,7 +3,7 @@ use std::io::Cursor;
 use time;
 use std::fmt;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use rocksdb::{DB, DBIterator, IteratorMode, ColumnFamily, CompactionDecision, MergeOperands};
+use rocksdb::{DB, DBIterator, IteratorMode, ColumnFamily, CompactionDecision, MergeOperands, WriteOptions};
 use bincode::{serialize_into, serialize, deserialize, Infinite};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::{Serialize};
@@ -65,36 +65,39 @@ pub struct Kv {
 }
 
 #[derive(Clone)]
-pub struct Set<K> {
+pub struct Set<K,T> {
     db: Arc<DB>,
     cf: ColumnFamily,
-    p: PhantomData<K>,
+    p1: PhantomData<K>,
+    p2: PhantomData<T>,
 }
 
 #[derive(Clone)]
-pub struct Map<K, V> {
+pub struct Map<K, U, V> {
     db: Arc<DB>,
     cf: ColumnFamily,
-    pk: PhantomData<K>,
-    pv: PhantomData<V>,
+    p1: PhantomData<K>,
+    p2: PhantomData<U>,
+    p3: PhantomData<V>,
 }
 
 #[derive(Clone)]
-pub struct List<K> {
+pub struct List<K,T> {
     db: Arc<DB>,
     cf: ColumnFamily,
-    p: PhantomData<K>,
+    p1: PhantomData<K>,
+    p2: PhantomData<T>,
 }
 
 
 unsafe impl Send for Kv {}
 unsafe impl Sync for Kv {}
-unsafe impl<K> Send for Set<K> {}
-unsafe impl<K> Sync for Set<K> {}
-unsafe impl<K,V> Send for Map<K,V> {}
-unsafe impl<K,V> Sync for Map<K,V> {}
-unsafe impl<K> Send for List<K> {}
-unsafe impl<K> Sync for List<K> {}
+unsafe impl<K,T> Send for Set<K,T> {}
+unsafe impl<K,T> Sync for Set<K,T> {}
+unsafe impl<K,U,V> Send for Map<K,U,V> {}
+unsafe impl<K,U,V> Sync for Map<K,U,V> {}
+unsafe impl<K,T> Send for List<K,T> {}
+unsafe impl<K,T> Sync for List<K,T> {}
 
 impl Kv {
     pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Kv {
@@ -172,7 +175,7 @@ impl Kv {
     where
         V: Serialize + DeserializeOwned,
     {
-        let mut vbuf : Vec<u8> = vec![]; 
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
         serialize_into(&mut vbuf, &val, Infinite).map_err(Error::from)?;
         //println!("{:?}, {:?}", key, vbuf);
@@ -193,7 +196,7 @@ impl Kv {
         V: Serialize + DeserializeOwned,
     {
         let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(Error::from)?;
-        let mut vbuf: Vec<u8> = vec![];
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
         serialize_into(&mut vbuf, &val, Infinite)?;
         self.db
@@ -245,11 +248,75 @@ impl Kv {
     }
 }
 
-impl<K> Set<K> 
-    where K : Serialize + DeserializeOwned + Ord + Clone
+impl<K,T> Set<K,T> 
+    where K : Serialize + DeserializeOwned + Ord + Clone,
+          T : Serialize + DeserializeOwned + Ord + Clone
 {
-    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Set<K> {
-        Set { db, cf, p: PhantomData }
+    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Set<K,T> {
+        Set { db, cf, p1: PhantomData, p2: PhantomData }
+    }
+
+    pub fn create(&self, key: &K, values: &Vec<T>, ttl: Option<i64>) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, ttl)?;
+        let val : BTreeSet<&T> = values.iter().collect();
+        serialize_into(&mut vbuf, &val, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn get(&self, key: &K) -> Result<Option<BTreeSet<T>>, Error>
+    {
+        let kbuf : Vec<u8> = serialize(&key, Infinite).map_err(Error::from)?;
+        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                return Ok(None);
+            }
+            let v: BTreeSet<T> = deserialize(&inbuf[HDR_LEN..]).map_err(Error::from)?;
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete(&self, key: &K) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let opts = WriteOptions::default();
+        self.db.delete_cf_opt(self.cf, kbuf.as_slice(), &opts).map_err(Error::from)
+    }
+
+    pub fn set_ttl(&self, key: &K, ttl: i64) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, Some(ttl))?;
+        let op : Vec<UnaryOps<T>> = vec![];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
+    pub fn insert(&self, key: &K, item: &T) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Add(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn remove(&self, key: &K, item: &T) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Remove(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
     }
 
     pub fn partial_merge(
@@ -258,9 +325,9 @@ impl<K> Set<K>
         operands: &mut MergeOperands,
         ) -> Option<Vec<u8>> {
         let nops = operands.size_hint().0;
-        let mut result: Vec<UnaryOps<K>> = Vec::with_capacity(nops);
+        let mut result: Vec<UnaryOps<T>> = Vec::with_capacity(nops);
         for op in operands {
-            if let Ok(k) = deserialize::<Vec<UnaryOps<K>>>(op) {
+            if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
                 for e in k.into_iter() {
                     result.push(e);
                 }
@@ -279,11 +346,14 @@ impl<K> Set<K>
         ) -> Option<Vec<u8>> {
 
         let empty = vec![];
-        let mut result = existing_val.and_then(|ev| deserialize::<BTreeSet<K>>(ev).ok()).unwrap_or(BTreeSet::<K>::new());
+        let (ttl, mut result) = existing_val.and_then(|ev| {
+                let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok();
+                deserialize::<BTreeSet<T>>(&ev[HDR_LEN..]).ok().map(|s| (ttl, s))
+            }).unwrap_or((None, BTreeSet::<T>::new()));
 
         let ops = 
             operands.flat_map(|op| {
-                if let Ok(k) = deserialize::<Vec<UnaryOps<K>>>(op) {
+                if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
                     k.into_iter()
                 } else {
                     empty.clone().into_iter()
@@ -298,17 +368,20 @@ impl<K> Set<K>
             }
         }
 
-        serialize(&result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, ttl).ok()?;
+        serialize_into(&mut vbuf, &result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()?;
+        Some(vbuf)
     }
 }
 
-impl<K,V> Map<K,V>
+impl<K,U,V> Map<K,U,V>
     where K: Serialize + DeserializeOwned + Ord + Clone,
+          U: Serialize + DeserializeOwned + Ord + Clone,
           V: Serialize + DeserializeOwned + Clone,
-          V: 
 {
-    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Map<K,V> {
-        Map { db, cf, pk: PhantomData, pv: PhantomData }
+    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Map<K,U,V> {
+        Map { db, cf, p1: PhantomData, p2: PhantomData, p3: PhantomData }
     }
     pub fn partial_merge(
         _new_key: &[u8],
@@ -361,10 +434,12 @@ impl<K,V> Map<K,V>
     }
 }
 
-impl<V> List<V>
-    where V : Serialize + DeserializeOwned + Clone {
-    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> List<V> {
-        List { db, cf, p: PhantomData }
+impl<K,T> List<K,T>
+    where K : Serialize + DeserializeOwned + Clone, 
+          T : Serialize + DeserializeOwned + Clone 
+{
+    pub fn new(db: Arc<DB>, cf: ColumnFamily) -> List<K,T> {
+        List { db, cf, p1: PhantomData, p2: PhantomData }
     }
     
     pub fn partial_merge(
@@ -373,9 +448,9 @@ impl<V> List<V>
         operands: &mut MergeOperands,
         ) -> Option<Vec<u8>> {
         let nops = operands.size_hint().0;
-        let mut result: Vec<UnaryOps<V>> = Vec::with_capacity(nops);
+        let mut result: Vec<UnaryOps<T>> = Vec::with_capacity(nops);
         for op in operands {
-            if let Ok(k) = deserialize::<Vec<UnaryOps<V>>>(op) {
+            if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
                 for e in k.into_iter() {
                     result.push(e);
                 }
@@ -394,11 +469,11 @@ impl<V> List<V>
         ) -> Option<Vec<u8>> {
 
         let empty = vec![];
-        let mut result = existing_val.and_then(|ev| deserialize::<VecDeque<V>>(ev).ok()).unwrap_or(VecDeque::<V>::new());
+        let mut result = existing_val.and_then(|ev| deserialize::<VecDeque<T>>(ev).ok()).unwrap_or(VecDeque::<T>::new());
 
         let ops = 
             operands.flat_map(|op| {
-                if let Ok(k) = deserialize::<Vec<UnaryOps<V>>>(op) {
+                if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
                     k.into_iter()
                 } else {
                     empty.clone().into_iter()
