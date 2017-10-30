@@ -268,7 +268,11 @@ impl<K,T> Set<K,T>
             Error::from,
         )
     }
-    
+
+    pub fn contains(&self, key: &K, item: &T) -> Result<bool, Error> {
+        self.get(key).map(|o| o.map(|v| v.contains(item)).unwrap_or(false))
+    }
+
     pub fn get(&self, key: &K) -> Result<Option<BTreeSet<T>>, Error>
     {
         let kbuf : Vec<u8> = serialize(&key, Infinite).map_err(Error::from)?;
