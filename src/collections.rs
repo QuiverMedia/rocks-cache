@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::io::Cursor;
+use std::iter::IntoIterator;
 use time;
 use std::fmt;
 use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
@@ -27,8 +28,7 @@ pub enum UnaryOps<K> {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum MapOps<K, V> {
-    Put(K, V),
-    Update(K, V),
+    Upsert(K, V),
     Del(K),
 }
 
@@ -51,8 +51,7 @@ impl<K,V> fmt::Display for MapOps<K,V> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         use self:: MapOps::*;
         match self {
-            &Put(_,_) => write!(f, "Put<K,V>"),
-            &Update(_,_) => write!(f, "Update<K,V>"),
+            &Upsert(_,_) => write!(f, "Update<K,V>"),
             &Del(_) => write!(f, "Del<K>"),
         }
     }
@@ -250,19 +249,22 @@ impl Kv {
 
 impl<K,T> Set<K,T> 
     where K : Serialize + DeserializeOwned + Ord + Clone,
-          T : Serialize + DeserializeOwned + Ord + Clone
+          T : Serialize + DeserializeOwned + Ord + Clone,
 {
     pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Set<K,T> {
         Set { db, cf, p1: PhantomData, p2: PhantomData }
     }
 
-    pub fn create(&self, key: &K, values: &Vec<T>, ttl: Option<i64>) -> Result<(), Error> {
+    pub fn create<'a, I>(&self, key: &K, values: I, ttl: Option<i64>) -> Result<(), Error> 
+        where I: IntoIterator<Item=&'a T>,
+              T: 'a 
+    {
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf : Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
-        let val : BTreeSet<&T> = values.iter().collect();
+        let val : BTreeSet<&T> = values.into_iter().collect();
         serialize_into(&mut vbuf, &val, Infinite).map_err(Error::from)?;
-        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+        self.db.put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
             Error::from,
         )
     }
@@ -347,10 +349,11 @@ impl<K,T> Set<K,T>
 
         let empty = vec![];
         let (ttl, mut result) = existing_val.and_then(|ev| {
-                let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok();
+                let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
                 deserialize::<BTreeSet<T>>(&ev[HDR_LEN..]).ok().map(|s| (ttl, s))
-            }).unwrap_or((None, BTreeSet::<T>::new()));
+            }).unwrap_or((::std::i64::MAX, BTreeSet::<T>::new()));
 
+        println!("({:?})", ttl);
         let ops = 
             operands.flat_map(|op| {
                 if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
@@ -369,7 +372,7 @@ impl<K,T> Set<K,T>
         }
 
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
-        set_ttl(&mut vbuf, ttl).ok()?;
+        vbuf.write_i64::<LittleEndian>(ttl).map_err(|e| debug!("failed to serialize ttl: {:?}", e)).ok()?;
         serialize_into(&mut vbuf, &result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()?;
         Some(vbuf)
     }
@@ -383,16 +386,87 @@ impl<K,U,V> Map<K,U,V>
     pub fn new(db: Arc<DB>, cf: ColumnFamily) -> Map<K,U,V> {
         Map { db, cf, p1: PhantomData, p2: PhantomData, p3: PhantomData }
     }
+    
+    pub fn create<'a, I>(&self, key: &K, values: I, ttl: Option<i64>) -> Result<(), Error>
+        where I: IntoIterator<Item= &'a(U, V)>,
+              U: 'a,
+              V: 'a
+    {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, ttl)?;
+        let val : BTreeMap<&'a U,&'a V> = values.into_iter().map(|&(ref u, ref v)| (u, v)).collect();
+        serialize_into(&mut vbuf, &val, Infinite).map_err(Error::from)?;
+        self.db.put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn get(&self, key: &K) -> Result<Option<BTreeMap<U,V>>, Error>
+    {
+        let kbuf : Vec<u8> = serialize(&key, Infinite).map_err(Error::from)?;
+        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                return Ok(None);
+            }
+            let v: BTreeMap<U,V> = deserialize(&inbuf[HDR_LEN..]).map_err(Error::from)?;
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn get_val(&self, key: &K, entry_key: &U) -> Result<Option<V>, Error> {
+        self.get(key).map(|o| o.and_then(|v| v.get(entry_key).map(|v| v.clone())))
+    }
+
+    pub fn delete(&self, key: &K) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let opts = WriteOptions::default();
+        self.db.delete_cf_opt(self.cf, kbuf.as_slice(), &opts).map_err(Error::from)
+    }
+
+    pub fn set_ttl(&self, key: &K, ttl: i64) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, Some(ttl))?;
+        let op : Vec<MapOps<U,V>> = vec![];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
+    pub fn upsert(&self, key: &K, item_key: &U, item_val: &V) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![MapOps::Upsert(item_key, item_val)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn remove(&self, key: &K, item_key: &U) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Remove(item_key)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
     pub fn partial_merge(
         _new_key: &[u8],
         _existing_val: Option<&[u8]>,
         operands: &mut MergeOperands,
-        ) -> Option<Vec<u8>> 
-    {
+        ) -> Option<Vec<u8>> {
         let nops = operands.size_hint().0;
-        let mut result: Vec<MapOps<K,V>> = Vec::with_capacity(nops);
+        let mut result: Vec<MapOps<U,V>> = Vec::with_capacity(nops);
         for op in operands {
-            if let Ok(k) = deserialize::<Vec<MapOps<K,V>>>(op) {
+            if let Ok(k) = deserialize::<Vec<MapOps<U,V>>>(op) {
                 for e in k.into_iter() {
                     result.push(e);
                 }
@@ -403,19 +477,23 @@ impl<K,U,V> Map<K,U,V>
         }
         serialize(&result[..], Infinite).ok()
     }
-    
+
     pub fn full_merge(
         _new_key: &[u8],
         existing_val: Option<&[u8]>,
         operands: &mut MergeOperands,
-        ) -> Option<Vec<u8>>
-    {
-        let empty = vec![];
-        let mut result = existing_val.and_then(|ev| deserialize::<BTreeMap<K,V>>(ev).ok()).unwrap_or(BTreeMap::<K,V>::new());
+        ) -> Option<Vec<u8>> {
 
+        let empty = vec![];
+        let (ttl, mut result) = existing_val.and_then(|ev| {
+                let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
+                deserialize::<BTreeMap<U,V>>(&ev[HDR_LEN..]).ok().map(|s| (ttl, s))
+            }).unwrap_or((::std::i64::MAX, BTreeMap::<U,V>::new()));
+
+        println!("({:?})", ttl);
         let ops = 
             operands.flat_map(|op| {
-                if let Ok(k) = deserialize::<Vec<MapOps<K,V>>>(op) {
+                if let Ok(k) = deserialize::<Vec<MapOps<U,V>>>(op) {
                     k.into_iter()
                 } else {
                     empty.clone().into_iter()
@@ -424,13 +502,15 @@ impl<K,U,V> Map<K,U,V>
 
         for op in ops {
             match op {
-                MapOps::Put(k, v) => { result.insert(k, v); }
-                MapOps::Update(k, v) => { result.insert(k, v); }
-                MapOps::Del(ref k) => { result.remove(k); }
+                MapOps::Upsert(u,v) => { result.insert(u,v); },
+                MapOps::Del(ref u) => { result.remove(u); },
             }
         }
 
-        serialize(&result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        vbuf.write_i64::<LittleEndian>(ttl).map_err(|e| debug!("failed to serialize ttl: {:?}", e)).ok()?;
+        serialize_into(&mut vbuf, &result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()?;
+        Some(vbuf)
     }
 }
 
@@ -442,6 +522,104 @@ impl<K,T> List<K,T>
         List { db, cf, p1: PhantomData, p2: PhantomData }
     }
     
+    pub fn create<'a, I>(&self, key: &K, values: I, ttl: Option<i64>) -> Result<(), Error> 
+        where I: IntoIterator<Item=&'a T>,
+              T: 'a 
+    {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, ttl)?;
+        {
+            let val : VecDeque<&T> = values.into_iter().collect();
+            serialize_into(&mut vbuf, &val, Infinite).map_err(Error::from)?;
+        }
+        self.db.put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn get(&self, key: &K) -> Result<Option<VecDeque<T>>, Error>
+    {
+        let kbuf : Vec<u8> = serialize(&key, Infinite).map_err(Error::from)?;
+        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                return Ok(None);
+            }
+            let v: VecDeque<T> = deserialize(&inbuf[HDR_LEN..]).map_err(Error::from)?;
+            Ok(Some(v))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn delete(&self, key: &K) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let opts = WriteOptions::default();
+        self.db.delete_cf_opt(self.cf, kbuf.as_slice(), &opts).map_err(Error::from)
+    }
+
+    pub fn set_ttl(&self, key: &K, ttl: i64) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        set_ttl(&mut vbuf, Some(ttl))?;
+        let op : Vec<UnaryOps<T>> = vec![];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
+    pub fn insert(&self, key: &K, index: usize, item: &T) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Insert(index, item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn replace(&self, key: &K, index: usize, item: &T) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Replace(index, item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn remove(&self, key: &K, index: usize) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op : Vec<UnaryOps<T>> = vec![UnaryOps::Del(index)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
+    pub fn push(&self, key: &K, item: &T) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::Push(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+    
+    pub fn pop(&self, key: &K) -> Result<(), Error> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf : Vec<u8> = Vec::with_capacity(32);
+        let op : Vec<UnaryOps<T>> = vec![UnaryOps::Pop];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(Error::from)?;
+        self.db.merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice()).map_err(
+            Error::from,
+        )
+    }
+
     pub fn partial_merge(
         _new_key: &[u8],
         _existing_val: Option<&[u8]>,
@@ -469,8 +647,12 @@ impl<K,T> List<K,T>
         ) -> Option<Vec<u8>> {
 
         let empty = vec![];
-        let mut result = existing_val.and_then(|ev| deserialize::<VecDeque<T>>(ev).ok()).unwrap_or(VecDeque::<T>::new());
+        let (ttl, mut result) = existing_val.and_then(|ev| {
+                let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
+                deserialize::<VecDeque<T>>(&ev[HDR_LEN..]).ok().map(|s| (ttl, s))
+            }).unwrap_or((::std::i64::MAX, VecDeque::<T>::new()));
 
+        println!("({:?})", ttl);
         let ops = 
             operands.flat_map(|op| {
                 if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
@@ -482,17 +664,20 @@ impl<K,T> List<K,T>
 
         for op in ops {
             match op {
-                UnaryOps::Insert(idx, v) => { result.insert(idx, v); },
-                UnaryOps::Del(idx) => { result.remove(idx); },
-                UnaryOps::Replace(idx, v) => { result.push_back(v); result.swap_remove_back(idx); },
-                UnaryOps::Push(v) => { result.push_back(v) }
-                UnaryOps::Pop => { result.pop_front(); }
+                UnaryOps::Insert(i, t) => { result.insert(i, t); },
+                UnaryOps::Replace(i, t) => { result.push_back(t); result.swap_remove_back(i); },
+                UnaryOps::Del(i) => { result.remove(i); },
+                UnaryOps::Push(t) => { result.push_back(t); },
                 _ => { debug!("Invalid op supplied to Set: {}", op) },
             }
         }
 
-        serialize(&result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        vbuf.write_i64::<LittleEndian>(ttl).map_err(|e| debug!("failed to serialize ttl: {:?}", e)).ok()?;
+        serialize_into(&mut vbuf, &result, Infinite).map_err(|e| debug!("failed to serialize result {:?}", e)).ok()?;
+        Some(vbuf)
     }
+
 }
 
 fn ttl_expired(inbuf: &[u8]) -> Result<bool, Error> {

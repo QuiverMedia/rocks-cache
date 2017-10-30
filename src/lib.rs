@@ -274,13 +274,13 @@ impl Db {
               U : Serialize + DeserializeOwned + Ord + Clone,
               V : Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.sets.get(name).map(|cf| Map::<K,U,V>::new(self.db.clone(), cf.clone()))
+        self.maps.get(name).map(|cf| Map::<K,U,V>::new(self.db.clone(), cf.clone()))
     }
     pub fn get_list<K,T>(&self, name: &str) -> Option<List<K,T>>
         where K : Serialize + DeserializeOwned + Ord + Clone,
               T : Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.sets.get(name).map(|cf| List::<K,T>::new(self.db.clone(), cf.clone()))
+        self.lists.get(name).map(|cf| List::<K,T>::new(self.db.clone(), cf.clone()))
     }
 }
 
@@ -297,7 +297,7 @@ mod tests {
     extern crate rand;
     extern crate tempdir;
 
-    use std::collections::{HashMap, BTreeMap};
+    use std::collections::{HashMap, BTreeMap, BTreeSet, VecDeque};
     use std::cell::RefCell;
     use self::lipsum::{LOREM_IPSUM, LIBER_PRIMUS, MarkovChain};
     use self::quickcheck::{Gen, Arbitrary, StdGen};
@@ -308,16 +308,18 @@ mod tests {
 
     thread_local! {
 		// Markov chain generating lorem ipsum text.
-		static LOREM1: RefCell<MarkovChain<'static, rand::ThreadRng>> = {
-			let mut chain = MarkovChain::new();
+		static LOREM1: RefCell<MarkovChain<'static, rand::XorShiftRng>> = {
+            let rng = rand::XorShiftRng::new_unseeded();
+            let mut chain = MarkovChain::new_with_rng(rng);
 			// The cost of learning increases as more and more text is
 			// added, so we start with the smallest text.
 			chain.learn(LOREM_IPSUM);
 			chain.learn(LIBER_PRIMUS);
 			RefCell::new(chain)
 		};
-		static LOREM2: RefCell<MarkovChain<'static, rand::ThreadRng>> = {
-			let mut chain = MarkovChain::new();
+		static LOREM2: RefCell<MarkovChain<'static, rand::StdRng>> = {
+            let rng = rand::StdRng::new().unwrap();
+			let mut chain = MarkovChain::new_with_rng(rng);
 			// The cost of learning increases as more and more text is
 			// added, so we start with the smallest text.
 			chain.learn(LOREM_IPSUM);
@@ -433,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn it_sets() {
+    fn it_sets_sets() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
         let mut idb = DbBuilder::new(dir.path()).unwrap();
 
@@ -443,17 +445,17 @@ mod tests {
         println!("Getting set");
         let tbl = db.get_set::<String, String>("latin").unwrap();
 
-        let mut stuff = 
+        let mut stuff : Vec<String> =
             LOREM2.with(|cell| {
                 let mut chain1 = cell.borrow_mut();
                 chain1.iter().take(100).map(String::from).collect() });
 
         tbl.create(&key, &stuff, None).unwrap();
        
-        stuff.sort();
+        let sorted_stuff : Vec<String> = stuff.iter().map(|s| s.clone()).collect::<BTreeSet<String>>().into_iter().collect();
         let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
 
-        assert_eq!(results, stuff);
+        assert_eq!(results, sorted_stuff);
 
         for v in stuff.iter() {
             tbl.insert(&key, v).unwrap();
@@ -461,7 +463,165 @@ mod tests {
         
         let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
 
-        assert_eq!(results, stuff);
+        assert_eq!(results, sorted_stuff);
 
     }
+    
+    #[test]
+    fn it_gets_sets() {
+        let dir = tempdir::TempDir::new("rocks").unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
+
+        idb.create_set::<String, String>("latin").unwrap();
+        let db = idb.build().unwrap();
+        let key1 = "key1".to_string();
+        let key2 = "key2".to_string();
+
+        let tbl = db.get_set::<String, String>("latin").unwrap();
+
+        let mut stuff : Vec<String> = 
+            LOREM1.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let mut more_stuff : Vec<String> = 
+            LOREM2.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let sorted_more = more_stuff.iter().cloned().collect::<BTreeSet<String>>();
+        let sorted_stuff = stuff.iter().cloned().collect::<BTreeSet<String>>();
+        println!("sorted_stuff == {:?}", sorted_stuff);
+        println!("sorted_more == {:?}", sorted_more);
+
+        tbl.create(&key1, &stuff, None).unwrap();
+        
+        let results = tbl.get(&key1).unwrap().unwrap();
+        assert_eq!(results, sorted_stuff);
+        println!("results == {:?}", results); 
+        
+        for v in more_stuff.iter() {
+            tbl.insert(&key2, v).unwrap();
+        }
+
+        let more_results = tbl.get(&key2).unwrap().unwrap();
+        assert_eq!(more_results, sorted_more);
+        println!("more_results == {:?}", more_results); 
+
+        for v in more_results.iter() {
+            tbl.insert(&key1, v).unwrap();
+        }
+        
+        let results = tbl.get(&key1).unwrap().unwrap();
+
+        let big_stuff = stuff.iter().chain(more_stuff.iter()).cloned().collect::<BTreeSet<String>>();
+
+        println!("big_results == {:?}", results);
+        assert_eq!(results, big_stuff);
+
+        for v in sorted_more.iter() {
+            tbl.remove(&key1, v).unwrap();
+        }
+
+        let k1results = tbl.get(&key1).unwrap().unwrap();
+        println!("k1results == {:?}", k1results); 
+
+        let diff : BTreeSet<String> = sorted_stuff.difference(&sorted_more).cloned().collect();
+
+        assert_eq!(k1results, diff);
+
+        tbl.delete(&key1).unwrap();
+
+        assert_eq!(tbl.get(&key1).unwrap(), None);
+    }
+    
+    #[test]
+    fn it_sets_maps() {
+        let dir = tempdir::TempDir::new("rocks").unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
+
+        idb.create_map::<String, String, String>("latin").unwrap();
+
+        let db = idb.build().unwrap();
+        let key1 = "key1".to_string();
+        let key2 = "key2".to_string();
+
+        let tbl = db.get_map::<String, String, String>("latin").unwrap();
+
+        // ensure keys are unique
+        let mut keys1 : BTreeSet<String> = 
+            LOREM1.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let mut vals1 : Vec<String> = 
+            LOREM2.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        // ensure keys are unique
+        let mut keys2 : BTreeSet<String> = 
+            LOREM1.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let mut vals2 : Vec<String> = 
+            LOREM2.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let entries1 : Vec<(String, String)> = keys1.into_iter().zip(vals1.into_iter()).collect();
+        let entries2 : Vec<(String, String)> = keys2.into_iter().zip(vals2.into_iter()).collect();
+
+        tbl.create(&key1, &entries1, None).unwrap();
+
+        for &(ref k, ref v) in entries2.iter() {
+            tbl.upsert(&key2, k, v).unwrap();
+        }
+
+        for &(ref k, ref v) in entries1.iter() {
+            assert_eq!(tbl.get_val(&key1, k).unwrap(), Some(v.clone()))
+        }
+        
+        for &(ref k, ref v) in entries2.iter() {
+            assert_eq!(tbl.get_val(&key2, k).unwrap(), Some(v.clone()))
+        }
+
+    }
+
+    #[test]
+    fn it_sets_lists() {
+        let dir = tempdir::TempDir::new("rocks").unwrap();
+        let mut idb = DbBuilder::new(dir.path()).unwrap();
+
+        idb.create_list::<String, String>("latin").unwrap();
+        let db = idb.build().unwrap();
+        let key1 = "key1".to_string();
+        let key2 = "key2".to_string();
+
+        let tbl = db.get_list::<String, String>("latin").unwrap();
+
+        let mut stuff : Vec<String> = 
+            LOREM1.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        let mut more_stuff : Vec<String> = 
+            LOREM2.with(|cell| {
+                let mut chain1 = cell.borrow_mut();
+                chain1.iter().take(100).map(String::from).collect() });
+
+        tbl.create(&key1, &stuff, None).unwrap();
+        
+        let results = tbl.get(&key1).unwrap().unwrap();
+        assert_eq!(results, stuff.iter().cloned().collect::<VecDeque<String>>());
+        
+        for v in more_stuff.iter() {
+            tbl.push(&key2, v).unwrap();
+        }
+
+        let more_results = tbl.get(&key2).unwrap().unwrap();
+        assert_eq!(more_results, more_stuff.iter().cloned().collect::<VecDeque<String>>());
+    }
+
 }
