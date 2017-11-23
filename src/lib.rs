@@ -54,12 +54,16 @@ extern crate serde;
 extern crate bincode;
 extern crate byteorder;
 extern crate time;
+extern crate failure;
 
 #[macro_use]
 extern crate log;
 
 #[macro_use]
 extern crate serde_derive;
+
+#[macro_use]
+extern crate failure_derive;
 
 #[cfg(test)]
 extern crate tempdir;
@@ -68,15 +72,15 @@ mod collections;
 mod error;
 
 use std::collections::HashMap;
-use std::path::{PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use error::Error;
-pub use collections::{ Kv, Set, Map, List, ttl_filter };
+pub use error::RocksCacheError;
+pub use collections::{Kv, Set, Map, List, ttl_filter};
 pub use rocksdb::{DB, DBVector, DBIterator, IteratorMode, Options};
 use rocksdb::{ColumnFamilyDescriptor, ColumnFamily, CompactionDecision};
 
-use serde::{Serialize};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 
@@ -96,7 +100,7 @@ impl DbBuilder {
     /// Collections may only be added/removed to the database environment in this stage.
     /// After you have declared the necessary tables, execute `build()` to
     /// transform the `DbBuilder` into its executable form.
-    pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, Error> {
+    pub fn new<P: Into<PathBuf>>(path: P) -> Result<Self, RocksCacheError> {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
@@ -111,7 +115,7 @@ impl DbBuilder {
     /// Collections may only be added/removed to the database environment in this stage.
     /// After you have declared the necessary tables, execute `build()` to
     /// transform the `DbBuilder` into its executable form.
-    pub fn new_opts<P: Into<PathBuf>>(path: P, opts: Options) -> Result<Self, Error> {
+    pub fn new_opts<P: Into<PathBuf>>(path: P, opts: Options) -> Result<Self, RocksCacheError> {
         let kvs = Vec::new();
         let sets = Vec::new();
         let maps = Vec::new();
@@ -132,7 +136,7 @@ impl DbBuilder {
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_kv(&mut self, name: &str) -> Result<(), Error> {
+    pub fn create_kv(&mut self, name: &str) -> Result<(), RocksCacheError> {
 
         let fullname = format!("kvs_{}", name);
         if self.kvs.iter().any(|t| t.name().eq(&fullname)) {
@@ -145,15 +149,16 @@ impl DbBuilder {
             Ok(())
         }
     }
-    
+
     /// Adds a new `Set` collection to the Database environment.
     ///
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_set<K,T>(&mut self, name: &str) -> Result<(), Error>
-    where K : Serialize + DeserializeOwned + Ord + Clone,
-          T : Serialize + DeserializeOwned + Ord + Clone,
+    pub fn create_set<K, T>(&mut self, name: &str) -> Result<(), RocksCacheError>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        T: Serialize + DeserializeOwned + Ord + Clone,
     {
 
         let fullname = format!("set_{}", name);
@@ -162,22 +167,27 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("set_merge", Set::<K,T>::full_merge, Some(Set::<K,T>::partial_merge));
+            opts.set_merge_operator(
+                "set_merge",
+                Set::<K, T>::full_merge,
+                Some(Set::<K, T>::partial_merge),
+            );
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.sets.push(cfd);
             Ok(())
         }
     }
-    
+
     /// Adds a new `Map` collection to the Database environment.
     ///
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_map<K,U,V>(&mut self, name: &str) -> Result<(), Error> 
-    where K : Serialize + DeserializeOwned + Ord + Clone,
-          U :  Serialize + DeserializeOwned + Ord + Clone,
-          V :  Serialize + DeserializeOwned + Ord + Clone,
+    pub fn create_map<K, U, V>(&mut self, name: &str) -> Result<(), RocksCacheError>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        U: Serialize + DeserializeOwned + Ord + Clone,
+        V: Serialize + DeserializeOwned + Ord + Clone,
     {
         let fullname = format!("map_{}", name);
         if self.maps.iter().any(|t| t.name().eq(&fullname)) {
@@ -185,22 +195,27 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("map_merge", Map::<K,U,V>::full_merge, Some(Map::<K,U,V>::partial_merge));
+            opts.set_merge_operator(
+                "map_merge",
+                Map::<K, U, V>::full_merge,
+                Some(Map::<K, U, V>::partial_merge),
+            );
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
         }
     }
-   
+
 
     /// Adds a new `List` collection to the Database environment.
     ///
     /// In RocksDB parliance, this is actually a ColumnFamily.
     /// Multiple ColumnFamily's can actually be written/read atomically
     /// in a single operation, but this interface doesn't support it yet.
-    pub fn create_list<K,T>(&mut self, name: &str) -> Result<(), Error> 
-    where K :  Serialize + DeserializeOwned + Ord + Clone,
-          T :  Serialize + DeserializeOwned + Ord + Clone,
+    pub fn create_list<K, T>(&mut self, name: &str) -> Result<(), RocksCacheError>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        T: Serialize + DeserializeOwned + Ord + Clone,
     {
         let fullname = format!("lis_{}", name);
         if self.lists.iter().any(|t| t.name().eq(&fullname)) {
@@ -208,7 +223,11 @@ impl DbBuilder {
         } else {
             let mut opts = Options::default();
             opts.set_compaction_filter("ttl", ttl_filter);
-            opts.set_merge_operator("list_merge", List::<K,T>::full_merge, Some(List::<K,T>::partial_merge));
+            opts.set_merge_operator(
+                "list_merge",
+                List::<K, T>::full_merge,
+                Some(List::<K, T>::partial_merge),
+            );
             let cfd = ColumnFamilyDescriptor::new(fullname, opts);
             self.maps.push(cfd);
             Ok(())
@@ -220,33 +239,60 @@ impl DbBuilder {
     /// This function "freezes" the database environment from making any
     /// changes such as adding and removing tables. It also transforms
     /// the struct into something that can be safely used in separate threads.
-    pub fn build(self) -> Result<Db, Error> {
+    pub fn build(self) -> Result<Db, RocksCacheError> {
         let mut kvs = HashMap::<String, ColumnFamily>::new();
         let mut sets = HashMap::<String, ColumnFamily>::new();
-        let mut  maps = HashMap::<String, ColumnFamily>::new();
+        let mut maps = HashMap::<String, ColumnFamily>::new();
         let mut lists = HashMap::<String, ColumnFamily>::new();
 
-        let cfds : Vec<ColumnFamilyDescriptor> = self.kvs.into_iter()
+        let cfds: Vec<ColumnFamilyDescriptor> = self.kvs
+            .into_iter()
             .chain(self.sets.into_iter())
             .chain(self.maps.into_iter())
             .chain(self.lists.into_iter())
             .collect();
 
-        let names : Vec<String> = cfds.iter().map(|cf| cf.name().clone()).collect();
+        let names: Vec<String> = cfds.iter().map(|cf| cf.name().clone()).collect();
         let db = Arc::new(DB::open_cf_descriptors(&self.opts, self.path, cfds)?);
 
         for name in names {
             println!("{} -- {}", &name[..3], &name[4..]);
             match &name[..3] {
-                "kvs" => { if let Some(cf) = db.cf_handle(name.as_str()) { kvs.insert(name[4..].to_string(), cf); } },
-                "set" => { if let Some(cf) = db.cf_handle(name.as_str()) { sets.insert(name[4..].to_string(), cf); } },
-                "map" => { if let Some(cf) = db.cf_handle(name.as_str()) { maps.insert(name[4..].to_string(), cf); } },
-                "lis" => { if let Some(cf) = db.cf_handle(name.as_str()) { lists.insert(name[4..].to_string(), cf); } },
-                name => { if let Some(cf) = db.cf_handle(name) { kvs.insert(name.to_string(), cf); } },
+                "kvs" => {
+                    if let Some(cf) = db.cf_handle(name.as_str()) {
+                        kvs.insert(name[4..].to_string(), cf);
+                    }
+                }
+                "set" => {
+                    if let Some(cf) = db.cf_handle(name.as_str()) {
+                        sets.insert(name[4..].to_string(), cf);
+                    }
+                }
+                "map" => {
+                    if let Some(cf) = db.cf_handle(name.as_str()) {
+                        maps.insert(name[4..].to_string(), cf);
+                    }
+                }
+                "lis" => {
+                    if let Some(cf) = db.cf_handle(name.as_str()) {
+                        lists.insert(name[4..].to_string(), cf);
+                    }
+                }
+                name => {
+                    if let Some(cf) = db.cf_handle(name) {
+                        kvs.insert(name.to_string(), cf);
+                    }
+                }
             }
         }
 
-        Ok(Db { db, kvs, maps, sets, lists })
+        Ok(Db {
+            db,
+            kvs,
+            maps,
+            sets,
+            lists,
+        })
     }
 }
 
@@ -261,26 +307,37 @@ pub struct Db {
 
 impl Db {
     pub fn get_kv(&self, name: &str) -> Option<Kv> {
-        self.kvs.get(name).map(|cf| Kv::new(self.db.clone(), cf.clone()))
+        self.kvs.get(name).map(
+            |cf| Kv::new(self.db.clone(), cf.clone()),
+        )
     }
-    pub fn get_set<K,T>(&self, name: &str) -> Option<Set<K,T>>
-        where K : Serialize + DeserializeOwned + Ord + Clone,
-              T : Serialize + DeserializeOwned + Ord + Clone,
+    pub fn get_set<K, T>(&self, name: &str) -> Option<Set<K, T>>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        T: Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.sets.get(name).map(|cf| Set::<K,T>::new(self.db.clone(), cf.clone()))
+        self.sets.get(name).map(|cf| {
+            Set::<K, T>::new(self.db.clone(), cf.clone())
+        })
     }
-    pub fn get_map<K,U,V>(&self, name: &str) -> Option<Map<K,U,V>>
-        where K : Serialize + DeserializeOwned + Ord + Clone,
-              U : Serialize + DeserializeOwned + Ord + Clone,
-              V : Serialize + DeserializeOwned + Ord + Clone,
+    pub fn get_map<K, U, V>(&self, name: &str) -> Option<Map<K, U, V>>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        U: Serialize + DeserializeOwned + Ord + Clone,
+        V: Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.maps.get(name).map(|cf| Map::<K,U,V>::new(self.db.clone(), cf.clone()))
+        self.maps.get(name).map(|cf| {
+            Map::<K, U, V>::new(self.db.clone(), cf.clone())
+        })
     }
-    pub fn get_list<K,T>(&self, name: &str) -> Option<List<K,T>>
-        where K : Serialize + DeserializeOwned + Ord + Clone,
-              T : Serialize + DeserializeOwned + Ord + Clone,
+    pub fn get_list<K, T>(&self, name: &str) -> Option<List<K, T>>
+    where
+        K: Serialize + DeserializeOwned + Ord + Clone,
+        T: Serialize + DeserializeOwned + Ord + Clone,
     {
-        self.lists.get(name).map(|cf| List::<K,T>::new(self.db.clone(), cf.clone()))
+        self.lists.get(name).map(|cf| {
+            List::<K, T>::new(self.db.clone(), cf.clone())
+        })
     }
 }
 
@@ -445,28 +502,33 @@ mod tests {
         println!("Getting set");
         let tbl = db.get_set::<String, String>("latin").unwrap();
 
-        let mut stuff : Vec<String> =
-            LOREM2.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut stuff: Vec<String> = LOREM2.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
         tbl.create(&key, &stuff, None).unwrap();
-       
-        let sorted_stuff : Vec<String> = stuff.iter().map(|s| s.clone()).collect::<BTreeSet<String>>().into_iter().collect();
-        let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
+
+        let sorted_stuff: Vec<String> = stuff
+            .iter()
+            .map(|s| s.clone())
+            .collect::<BTreeSet<String>>()
+            .into_iter()
+            .collect();
+        let results: Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
 
         assert_eq!(results, sorted_stuff);
 
         for v in stuff.iter() {
             tbl.insert(&key, v).unwrap();
         }
-        
-        let results : Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
+
+        let results: Vec<String> = tbl.get(&key).unwrap().unwrap().into_iter().collect();
 
         assert_eq!(results, sorted_stuff);
 
     }
-    
+
     #[test]
     fn it_gets_sets() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
@@ -479,15 +541,15 @@ mod tests {
 
         let tbl = db.get_set::<String, String>("latin").unwrap();
 
-        let mut stuff : Vec<String> = 
-            LOREM1.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut stuff: Vec<String> = LOREM1.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
-        let mut more_stuff : Vec<String> = 
-            LOREM2.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut more_stuff: Vec<String> = LOREM2.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
         let sorted_more = more_stuff.iter().cloned().collect::<BTreeSet<String>>();
         let sorted_stuff = stuff.iter().cloned().collect::<BTreeSet<String>>();
@@ -495,26 +557,30 @@ mod tests {
         println!("sorted_more == {:?}", sorted_more);
 
         tbl.create(&key1, &stuff, None).unwrap();
-        
+
         let results = tbl.get(&key1).unwrap().unwrap();
         assert_eq!(results, sorted_stuff);
-        println!("results == {:?}", results); 
-        
+        println!("results == {:?}", results);
+
         for v in more_stuff.iter() {
             tbl.insert(&key2, v).unwrap();
         }
 
         let more_results = tbl.get(&key2).unwrap().unwrap();
         assert_eq!(more_results, sorted_more);
-        println!("more_results == {:?}", more_results); 
+        println!("more_results == {:?}", more_results);
 
         for v in more_results.iter() {
             tbl.insert(&key1, v).unwrap();
         }
-        
+
         let results = tbl.get(&key1).unwrap().unwrap();
 
-        let big_stuff = stuff.iter().chain(more_stuff.iter()).cloned().collect::<BTreeSet<String>>();
+        let big_stuff = stuff
+            .iter()
+            .chain(more_stuff.iter())
+            .cloned()
+            .collect::<BTreeSet<String>>();
 
         println!("big_results == {:?}", results);
         assert_eq!(results, big_stuff);
@@ -524,9 +590,9 @@ mod tests {
         }
 
         let k1results = tbl.get(&key1).unwrap().unwrap();
-        println!("k1results == {:?}", k1results); 
+        println!("k1results == {:?}", k1results);
 
-        let diff : BTreeSet<String> = sorted_stuff.difference(&sorted_more).cloned().collect();
+        let diff: BTreeSet<String> = sorted_stuff.difference(&sorted_more).cloned().collect();
 
         assert_eq!(k1results, diff);
 
@@ -534,7 +600,7 @@ mod tests {
 
         assert_eq!(tbl.get(&key1).unwrap(), None);
     }
-    
+
     #[test]
     fn it_sets_maps() {
         let dir = tempdir::TempDir::new("rocks").unwrap();
@@ -549,29 +615,29 @@ mod tests {
         let tbl = db.get_map::<String, String, String>("latin").unwrap();
 
         // ensure keys are unique
-        let mut keys1 : BTreeSet<String> = 
-            LOREM1.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut keys1: BTreeSet<String> = LOREM1.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
-        let mut vals1 : Vec<String> = 
-            LOREM2.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut vals1: Vec<String> = LOREM2.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
         // ensure keys are unique
-        let mut keys2 : BTreeSet<String> = 
-            LOREM1.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut keys2: BTreeSet<String> = LOREM1.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
-        let mut vals2 : Vec<String> = 
-            LOREM2.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut vals2: Vec<String> = LOREM2.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
-        let entries1 : Vec<(String, String)> = keys1.into_iter().zip(vals1.into_iter()).collect();
-        let entries2 : Vec<(String, String)> = keys2.into_iter().zip(vals2.into_iter()).collect();
+        let entries1: Vec<(String, String)> = keys1.into_iter().zip(vals1.into_iter()).collect();
+        let entries2: Vec<(String, String)> = keys2.into_iter().zip(vals2.into_iter()).collect();
 
         tbl.create(&key1, &entries1, None).unwrap();
 
@@ -582,7 +648,7 @@ mod tests {
         for &(ref k, ref v) in entries1.iter() {
             assert_eq!(tbl.get_val(&key1, k).unwrap(), Some(v.clone()))
         }
-        
+
         for &(ref k, ref v) in entries2.iter() {
             assert_eq!(tbl.get_val(&key2, k).unwrap(), Some(v.clone()))
         }
@@ -601,27 +667,30 @@ mod tests {
 
         let tbl = db.get_list::<String, String>("latin").unwrap();
 
-        let mut stuff : Vec<String> = 
-            LOREM1.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut stuff: Vec<String> = LOREM1.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
-        let mut more_stuff : Vec<String> = 
-            LOREM2.with(|cell| {
-                let mut chain1 = cell.borrow_mut();
-                chain1.iter().take(100).map(String::from).collect() });
+        let mut more_stuff: Vec<String> = LOREM2.with(|cell| {
+            let mut chain1 = cell.borrow_mut();
+            chain1.iter().take(100).map(String::from).collect()
+        });
 
         tbl.create(&key1, &stuff, None).unwrap();
-        
+
         let results = tbl.get(&key1).unwrap().unwrap();
         assert_eq!(results, stuff.iter().cloned().collect::<VecDeque<String>>());
-        
+
         for v in more_stuff.iter() {
             tbl.push(&key2, v).unwrap();
         }
 
         let more_results = tbl.get(&key2).unwrap().unwrap();
-        assert_eq!(more_results, more_stuff.iter().cloned().collect::<VecDeque<String>>());
+        assert_eq!(
+            more_results,
+            more_stuff.iter().cloned().collect::<VecDeque<String>>()
+        );
     }
 
 }
