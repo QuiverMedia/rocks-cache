@@ -167,6 +167,24 @@ impl Kv {
         }
     }
 
+    /// exists
+    ///
+    /// Check if there is an entry in the Db for the raw bytes key
+    /// if the ttl for the record is expired, Ok(false) is returned
+    /// If there is no value found for the key,  Ok(false) is returned
+    pub fn exists(&self, key: &[u8]) -> Result<bool, RocksCacheError> {
+        let res = self.db.get_cf(self.cf, key).map_err(RocksCacheError::from)?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
     /// put
     ///
     /// Puts a `Serialize` value into the table at the corresponding `key
