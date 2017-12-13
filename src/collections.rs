@@ -130,12 +130,12 @@ impl Kv {
     /// Get a `Serialize` value at the corresponding `Serialize` key
     /// if the ttl for the record is expired, Ok(None) is returned
     /// If there is no value found for the key,  Ok(None) is returned
-    pub fn get_mp<'de, K, V>(&self, key: K) -> Result<Option<V>, RocksCacheError>
+    pub fn get_mp<'de, K, V>(&self, key: &K) -> Result<Option<V>, RocksCacheError>
     where
         K: Serialize + DeserializeOwned,
         V: Serialize + DeserializeOwned,
     {
-        let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(RocksCacheError::from)?;
+        let kbuf: Vec<u8> = serialize(key, Infinite).map_err(RocksCacheError::from)?;
         let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
         if let Some(inbuf) = res {
             if ttl_expired(&inbuf[..])? {
@@ -191,13 +191,13 @@ impl Kv {
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
     /// If ttl is None, then the record won't expire
-    pub fn put<'de, V>(&self, key: &[u8], val: V, ttl: Option<i64>) -> Result<(), RocksCacheError>
+    pub fn put<'de, V>(&self, key: &[u8], val: &V, ttl: Option<i64>) -> Result<(), RocksCacheError>
     where
         V: Serialize + DeserializeOwned,
     {
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
-        serialize_into(&mut vbuf, &val, Infinite).map_err(
+        serialize_into(&mut vbuf, val, Infinite).map_err(
             RocksCacheError::from,
         )?;
         //println!("{:?}, {:?}", key, vbuf);
@@ -212,15 +212,20 @@ impl Kv {
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
     /// If ttl is None, then the record won't expire
-    pub fn put_mp<'de, K, V>(&self, key: K, val: V, ttl: Option<i64>) -> Result<(), RocksCacheError>
+    pub fn put_mp<'de, K, V>(
+        &self,
+        key: &K,
+        val: &V,
+        ttl: Option<i64>,
+    ) -> Result<(), RocksCacheError>
     where
         K: Serialize + DeserializeOwned,
         V: Serialize + DeserializeOwned,
     {
-        let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(RocksCacheError::from)?;
+        let kbuf: Vec<u8> = serialize(key, Infinite).map_err(RocksCacheError::from)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
-        serialize_into(&mut vbuf, &val, Infinite)?;
+        serialize_into(&mut vbuf, val, Infinite)?;
         self.db
             .put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)

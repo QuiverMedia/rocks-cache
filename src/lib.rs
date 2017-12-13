@@ -437,7 +437,7 @@ mod tests {
         let accts: BTreeMap<String, Account> = accts.into_iter().collect();
 
         for (k, v) in accts.iter() {
-            acct_tbl.put(k.as_bytes(), v.clone(), Some(100)).unwrap();
+            acct_tbl.put(k.as_bytes(), v, Some(100)).unwrap();
         }
 
         let mut newaccts = BTreeMap::<String, Account>::new();
@@ -470,7 +470,7 @@ mod tests {
 
         println!("Putting abytes");
         for (k, v) in accts.iter() {
-            acct_tbl.put(k.as_bytes(), v.clone(), Some(4)).unwrap();
+            acct_tbl.put(k.as_bytes(), v, Some(4)).unwrap();
         }
 
         println!("Getting abytes");
