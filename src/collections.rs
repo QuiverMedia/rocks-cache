@@ -60,22 +60,22 @@ impl<K, V> fmt::Display for MapOps<K, V> {
 
 #[derive(Clone)]
 pub struct Kv {
-    db: Arc<DB>,
-    cf: ColumnFamily,
+    pub db: Arc<DB>,
+    pub cf: ColumnFamily,
 }
 
 #[derive(Clone)]
 pub struct Set<K, T> {
-    db: Arc<DB>,
-    cf: ColumnFamily,
+    pub db: Arc<DB>,
+    pub cf: ColumnFamily,
     p1: PhantomData<K>,
     p2: PhantomData<T>,
 }
 
 #[derive(Clone)]
 pub struct Map<K, U, V> {
-    db: Arc<DB>,
-    cf: ColumnFamily,
+    pub db: Arc<DB>,
+    pub cf: ColumnFamily,
     p1: PhantomData<K>,
     p2: PhantomData<U>,
     p3: PhantomData<V>,
@@ -83,8 +83,8 @@ pub struct Map<K, U, V> {
 
 #[derive(Clone)]
 pub struct List<K, T> {
-    db: Arc<DB>,
-    cf: ColumnFamily,
+    pub db: Arc<DB>,
+    pub cf: ColumnFamily,
     p1: PhantomData<K>,
     p2: PhantomData<T>,
 }
@@ -187,7 +187,7 @@ impl Kv {
 
     /// put
     ///
-    /// Puts a `Serialize` value into the table at the corresponding `key
+    /// Puts a `Serialize` value into the table at the corresponding bytes `key`
     /// The value will expire and be removed from the table at ttl seconds from
     /// the function call
     /// If ttl is None, then the record won't expire
@@ -206,7 +206,7 @@ impl Kv {
         )
     }
 
-    /// put_raw
+    /// put_mp
     ///
     /// Puts a `Serialize` value into the table at the corresponding `Serialize` key
     /// The value will expire and be removed from the table at ttl seconds from
