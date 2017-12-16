@@ -817,7 +817,7 @@ where
     }
 }
 
-fn ttl_expired(inbuf: &[u8]) -> Result<bool, RocksCacheError> {
+pub fn ttl_expired(inbuf: &[u8]) -> Result<bool, RocksCacheError> {
     let ttl = {
         Cursor::new(inbuf).read_i64::<LittleEndian>()?
     };
