@@ -324,7 +324,7 @@ impl Db {
     where
         K: Serialize + DeserializeOwned + Ord + Clone,
         U: Serialize + DeserializeOwned + Ord + Clone,
-        V: Serialize + DeserializeOwned + Ord + Clone,
+        V: Serialize + DeserializeOwned + Clone,
     {
         self.maps.get(name).map(|cf| {
             Map::<K, U, V>::new(self.db.clone(), cf.clone())
