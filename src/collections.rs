@@ -3,10 +3,10 @@ use std::io::Cursor;
 use std::iter::IntoIterator;
 use time;
 use std::fmt;
-use byteorder::{ReadBytesExt, WriteBytesExt, LittleEndian};
-use rocksdb::{DB, DBIterator, IteratorMode, ColumnFamily, CompactionDecision, MergeOperands,
-              WriteOptions};
-use bincode::{serialize_into, serialize, deserialize, Infinite};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use rocksdb::{ColumnFamily, CompactionDecision, DBIterator, IteratorMode, MergeOperands,
+              WriteOptions, DB};
+use bincode::{deserialize, serialize, serialize_into, Infinite};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -89,7 +89,6 @@ pub struct List<K, T> {
     p2: PhantomData<T>,
 }
 
-
 unsafe impl Send for Kv {}
 unsafe impl Sync for Kv {}
 unsafe impl<K, T> Send for Set<K, T> {}
@@ -141,9 +140,7 @@ impl Kv {
             if ttl_expired(&inbuf[..])? {
                 return Ok(None);
             }
-            let v: V = deserialize(&inbuf[HDR_LEN..]).map_err(
-                RocksCacheError::from,
-            )?;
+            let v: V = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
             Ok(Some(v))
         } else {
             Ok(None)
@@ -197,13 +194,11 @@ impl Kv {
     {
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
-        serialize_into(&mut vbuf, val, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, val, Infinite).map_err(RocksCacheError::from)?;
         //println!("{:?}, {:?}", key, vbuf);
-        self.db.put_cf(self.cf, key, vbuf.as_slice()).map_err(
-            RocksCacheError::from,
-        )
+        self.db
+            .put_cf(self.cf, key, vbuf.as_slice())
+            .map_err(RocksCacheError::from)
     }
 
     /// put_mp
@@ -240,18 +235,18 @@ impl Kv {
         let mut vbuf = Vec::<u8>::with_capacity(val.len() + HDR_LEN);
         set_ttl(&mut vbuf, ttl)?;
         vbuf.extend_from_slice(val);
-        self.db.put_cf(self.cf, key, val).map_err(
-            RocksCacheError::from,
-        )
+        self.db
+            .put_cf(self.cf, key, val)
+            .map_err(RocksCacheError::from)
     }
 
     /// delete
     ///
     /// deletes a record corresponding to the supplied key
     pub fn delete(&self, key: &[u8]) -> Result<(), RocksCacheError> {
-        self.db.delete_cf(self.cf, key).map_err(
-            RocksCacheError::from,
-        )
+        self.db
+            .delete_cf(self.cf, key)
+            .map_err(RocksCacheError::from)
     }
 
     /// delete_mp
@@ -262,9 +257,9 @@ impl Kv {
         K: Serialize + DeserializeOwned,
     {
         let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(RocksCacheError::from)?;
-        self.db.delete_cf(self.cf, kbuf.as_slice()).map_err(
-            RocksCacheError::from,
-        )
+        self.db
+            .delete_cf(self.cf, kbuf.as_slice())
+            .map_err(RocksCacheError::from)
     }
 
     /// iter
@@ -275,9 +270,9 @@ impl Kv {
     /// Iterates through the table (or a subrange of the table)
     /// in the manner specified
     pub fn iter(&self, mode: IteratorMode) -> Result<DBIterator, RocksCacheError> {
-        self.db.iterator_cf(self.cf, mode).map_err(
-            RocksCacheError::from,
-        )
+        self.db
+            .iterator_cf(self.cf, mode)
+            .map_err(RocksCacheError::from)
     }
 }
 
@@ -304,18 +299,15 @@ where
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, ttl)?;
         let val: BTreeSet<&T> = values.into_iter().collect();
-        serialize_into(&mut vbuf, &val, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &val, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
     }
 
     pub fn contains(&self, key: &K, item: &T) -> Result<bool, RocksCacheError> {
-        self.get(key).map(|o| {
-            o.map(|v| v.contains(item)).unwrap_or(false)
-        })
+        self.get(key)
+            .map(|o| o.map(|v| v.contains(item)).unwrap_or(false))
     }
 
     pub fn get(&self, key: &K) -> Result<Option<BTreeSet<T>>, RocksCacheError> {
@@ -325,12 +317,24 @@ where
             if ttl_expired(&inbuf[..])? {
                 return Ok(None);
             }
-            let v: BTreeSet<T> = deserialize(&inbuf[HDR_LEN..]).map_err(
-                RocksCacheError::from,
-            )?;
+            let v: BTreeSet<T> = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
             Ok(Some(v))
         } else {
             Ok(None)
+        }
+    }
+
+    pub fn len(&self, key: &K) -> Result<usize, RocksCacheError> {
+        let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(RocksCacheError::from)?;
+        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                return Ok(0);
+            }
+            let v: BTreeSet<T> = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
+            Ok(v.len())
+        } else {
+            Ok(0)
         }
     }
 
@@ -347,9 +351,7 @@ where
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, Some(ttl))?;
         let op: Vec<UnaryOps<T>> = vec![];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -359,9 +361,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Add(item)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -371,9 +371,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Remove(item)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -404,22 +402,23 @@ where
         existing_val: Option<&[u8]>,
         operands: &mut MergeOperands,
     ) -> Option<Vec<u8>> {
-
         let empty = vec![];
         let (ttl, mut result) = existing_val
             .and_then(|ev| {
                 let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
-                deserialize::<BTreeSet<T>>(&ev[HDR_LEN..]).ok().map(
-                    |s| (ttl, s),
-                )
+                deserialize::<BTreeSet<T>>(&ev[HDR_LEN..])
+                    .ok()
+                    .map(|s| (ttl, s))
             })
             .unwrap_or((::std::i64::MAX, BTreeSet::<T>::new()));
 
         println!("({:?})", ttl);
-        let ops = operands.flat_map(|op| if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
-            k.into_iter()
-        } else {
-            empty.clone().into_iter()
+        let ops = operands.flat_map(|op| {
+            if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
+                k.into_iter()
+            } else {
+                empty.clone().into_iter()
+            }
         });
 
         for op in ops {
@@ -472,9 +471,7 @@ where
         set_ttl(&mut vbuf, ttl)?;
         let val: BTreeMap<&'a U, &'a V> =
             values.into_iter().map(|&(ref u, ref v)| (u, v)).collect();
-        serialize_into(&mut vbuf, &val, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &val, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -487,9 +484,7 @@ where
             if ttl_expired(&inbuf[..])? {
                 return Ok(None);
             }
-            let v: BTreeMap<U, V> = deserialize(&inbuf[HDR_LEN..]).map_err(
-                RocksCacheError::from,
-            )?;
+            let v: BTreeMap<U, V> = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
             Ok(Some(v))
         } else {
             Ok(None)
@@ -497,9 +492,8 @@ where
     }
 
     pub fn get_val(&self, key: &K, entry_key: &U) -> Result<Option<V>, RocksCacheError> {
-        self.get(key).map(|o| {
-            o.and_then(|v| v.get(entry_key).map(|v| v.clone()))
-        })
+        self.get(key)
+            .map(|o| o.and_then(|v| v.get(entry_key).map(|v| v.clone())))
     }
 
     pub fn delete(&self, key: &K) -> Result<(), RocksCacheError> {
@@ -515,9 +509,7 @@ where
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, Some(ttl))?;
         let op: Vec<MapOps<U, V>> = vec![];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -527,9 +519,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![MapOps::Upsert(item_key, item_val)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -539,9 +529,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Remove(item_key)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -572,24 +560,23 @@ where
         existing_val: Option<&[u8]>,
         operands: &mut MergeOperands,
     ) -> Option<Vec<u8>> {
-
         let empty = vec![];
         let (ttl, mut result) = existing_val
             .and_then(|ev| {
                 let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
-                deserialize::<BTreeMap<U, V>>(&ev[HDR_LEN..]).ok().map(
-                    |s| {
-                        (ttl, s)
-                    },
-                )
+                deserialize::<BTreeMap<U, V>>(&ev[HDR_LEN..])
+                    .ok()
+                    .map(|s| (ttl, s))
             })
             .unwrap_or((::std::i64::MAX, BTreeMap::<U, V>::new()));
 
         println!("({:?})", ttl);
-        let ops = operands.flat_map(|op| if let Ok(k) = deserialize::<Vec<MapOps<U, V>>>(op) {
-            k.into_iter()
-        } else {
-            empty.clone().into_iter()
+        let ops = operands.flat_map(|op| {
+            if let Ok(k) = deserialize::<Vec<MapOps<U, V>>>(op) {
+                k.into_iter()
+            } else {
+                empty.clone().into_iter()
+            }
         });
 
         for op in ops {
@@ -638,9 +625,7 @@ where
         set_ttl(&mut vbuf, ttl)?;
         {
             let val: VecDeque<&T> = values.into_iter().collect();
-            serialize_into(&mut vbuf, &val, Infinite).map_err(
-                RocksCacheError::from,
-            )?;
+            serialize_into(&mut vbuf, &val, Infinite).map_err(RocksCacheError::from)?;
         }
         self.db
             .put_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
@@ -654,9 +639,7 @@ where
             if ttl_expired(&inbuf[..])? {
                 return Ok(None);
             }
-            let v: VecDeque<T> = deserialize(&inbuf[HDR_LEN..]).map_err(
-                RocksCacheError::from,
-            )?;
+            let v: VecDeque<T> = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
             Ok(Some(v))
         } else {
             Ok(None)
@@ -676,9 +659,7 @@ where
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         set_ttl(&mut vbuf, Some(ttl))?;
         let op: Vec<UnaryOps<T>> = vec![];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -688,9 +669,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Insert(index, item)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -700,9 +679,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Replace(index, item)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -712,9 +689,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op: Vec<UnaryOps<T>> = vec![UnaryOps::Del(index)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -724,9 +699,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op = vec![UnaryOps::Push(item)];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -736,9 +709,7 @@ where
         let kbuf = serialize(&key, Infinite)?;
         let mut vbuf: Vec<u8> = Vec::with_capacity(32);
         let op: Vec<UnaryOps<T>> = vec![UnaryOps::Pop];
-        serialize_into(&mut vbuf, &op, Infinite).map_err(
-            RocksCacheError::from,
-        )?;
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
         self.db
             .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
             .map_err(RocksCacheError::from)
@@ -769,22 +740,23 @@ where
         existing_val: Option<&[u8]>,
         operands: &mut MergeOperands,
     ) -> Option<Vec<u8>> {
-
         let empty = vec![];
         let (ttl, mut result) = existing_val
             .and_then(|ev| {
                 let ttl = Cursor::new(ev).read_i64::<LittleEndian>().ok()?;
-                deserialize::<VecDeque<T>>(&ev[HDR_LEN..]).ok().map(
-                    |s| (ttl, s),
-                )
+                deserialize::<VecDeque<T>>(&ev[HDR_LEN..])
+                    .ok()
+                    .map(|s| (ttl, s))
             })
             .unwrap_or((::std::i64::MAX, VecDeque::<T>::new()));
 
         println!("({:?})", ttl);
-        let ops = operands.flat_map(|op| if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
-            k.into_iter()
-        } else {
-            empty.clone().into_iter()
+        let ops = operands.flat_map(|op| {
+            if let Ok(k) = deserialize::<Vec<UnaryOps<T>>>(op) {
+                k.into_iter()
+            } else {
+                empty.clone().into_iter()
+            }
         });
 
         for op in ops {
@@ -818,22 +790,18 @@ where
 }
 
 pub fn ttl_expired(inbuf: &[u8]) -> Result<bool, RocksCacheError> {
-    let ttl = {
-        Cursor::new(inbuf).read_i64::<LittleEndian>()?
-    };
+    let ttl = { Cursor::new(inbuf).read_i64::<LittleEndian>()? };
     Ok(ttl < time::get_time().sec)
 }
 
 fn set_ttl(vbuf: &mut Vec<u8>, ttl: Option<i64>) -> Result<(), RocksCacheError> {
-
     let end = if let Some(t) = ttl {
         time::get_time().sec + t
     } else {
         ::std::i64::MAX
     };
-    vbuf.write_i64::<LittleEndian>(end).map_err(
-        RocksCacheError::from,
-    )
+    vbuf.write_i64::<LittleEndian>(end)
+        .map_err(RocksCacheError::from)
 }
 
 pub fn ttl_filter(_level: u32, _key: &[u8], value: &[u8]) -> CompactionDecision {
