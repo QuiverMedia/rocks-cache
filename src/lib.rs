@@ -187,7 +187,7 @@ impl DbBuilder {
     where
         K: Serialize + DeserializeOwned + Ord + Clone,
         U: Serialize + DeserializeOwned + Ord + Clone,
-        V: Serialize + DeserializeOwned + Ord + Clone,
+        V: Serialize + DeserializeOwned + Clone,
     {
         let fullname = format!("map_{}", name);
         if self.maps.iter().any(|t| t.name().eq(&fullname)) {
