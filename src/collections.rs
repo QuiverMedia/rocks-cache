@@ -468,7 +468,7 @@ where
                     result.append(&mut set);
                 }
                 UnaryOps::Subtract(vec) => {
-                    let mut set: BTreeSet<_> = vec.into_iter().collect();
+                    let set: BTreeSet<_> = vec.into_iter().collect();
                     let diff = result.difference(&set).cloned().collect();
                     result = diff;
                 }
