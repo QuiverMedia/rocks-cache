@@ -24,6 +24,8 @@ pub enum UnaryOps<K> {
     Del(usize),
     Replace(usize, K),
     Push(K),
+    Append(Vec<K>),
+    Subtract(Vec<K>),
     Pop,
 }
 
@@ -42,6 +44,8 @@ impl<K> fmt::Display for UnaryOps<K> {
             &Insert(_, _) => write!(f, "Insert<usize,K>"),
             &Del(_) => write!(f, "Del<usize>"),
             &Replace(_, _) => write!(f, "Replace<usize, K>"),
+            &Append(_) => write!(f, "Append<Set<K>>"),
+            &Subtract(_) => write!(f, "Subtract<Set<K>>"),
             &Push(_) => write!(f, "Push<K>"),
             &Pop => write!(f, "Pop"),
         }
@@ -305,6 +309,36 @@ where
             .map_err(RocksCacheError::from)
     }
 
+    pub fn append<'a, I>(&self, key: &K, values: I) -> Result<(), RocksCacheError>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        let item: Vec<&T> = values.into_iter().collect();
+        let op = vec![UnaryOps::Append(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
+        self.db
+            .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
+            .map_err(RocksCacheError::from)
+    }
+
+    pub fn subtract<'a, I>(&self, key: &K, values: I) -> Result<(), RocksCacheError>
+    where
+        I: IntoIterator<Item = &'a T>,
+        T: 'a,
+    {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        let item: Vec<&T> = values.into_iter().collect();
+        let op = vec![UnaryOps::Subtract(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
+        self.db
+            .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
+            .map_err(RocksCacheError::from)
+    }
+
     pub fn contains(&self, key: &K, item: &T) -> Result<bool, RocksCacheError> {
         self.get(key)
             .map(|o| o.map(|v| v.contains(item)).unwrap_or(false))
@@ -428,6 +462,15 @@ where
                 }
                 UnaryOps::Remove(ref k) => {
                     result.remove(k);
+                }
+                UnaryOps::Append(vec) => {
+                    let mut set: BTreeSet<_> = vec.into_iter().collect();
+                    result.append(&mut set);
+                }
+                UnaryOps::Subtract(vec) => {
+                    let mut set: BTreeSet<_> = vec.into_iter().collect();
+                    let diff = result.difference(&set).cloned().collect();
+                    result = diff;
                 }
                 _ => debug!("Invalid op supplied to Set: {}", op),
             }
