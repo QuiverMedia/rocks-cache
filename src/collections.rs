@@ -21,11 +21,14 @@ pub enum UnaryOps<K> {
     Add(K),
     Remove(K),
     Insert(usize, K),
+    AddIfGreatest(K),
     Del(usize),
     Replace(usize, K),
     Push(K),
     Append(Vec<K>),
     Subtract(Vec<K>),
+    RemoveGreater(K),
+    RemoveLess(K),
     Pop,
 }
 
@@ -42,11 +45,14 @@ impl<K> fmt::Display for UnaryOps<K> {
             &Add(_) => write!(f, "Add<K>"),
             &Remove(_) => write!(f, "Remove<K>"),
             &Insert(_, _) => write!(f, "Insert<usize,K>"),
+            &AddIfGreatest(_) => write!(f, "AddIfGreatest<usize,K>"),
             &Del(_) => write!(f, "Del<usize>"),
             &Replace(_, _) => write!(f, "Replace<usize, K>"),
             &Append(_) => write!(f, "Append<Set<K>>"),
             &Subtract(_) => write!(f, "Subtract<Set<K>>"),
             &Push(_) => write!(f, "Push<K>"),
+            &RemoveGreater(_) => write!(f, "RemoveGreater<K>"),
+            &RemoveLess(_) => write!(f, "RemoveGreater<K>"),
             &Pop => write!(f, "Pop"),
         }
     }
@@ -372,6 +378,54 @@ where
         }
     }
 
+    /// Count all members of the set that match the predicate
+    pub fn count_if<P>(&self, key: &K, cb: P) -> Result<usize, RocksCacheError>
+    where
+        P: FnMut(&T) -> bool,
+    {
+        let kbuf: Vec<u8> = serialize(&key, Infinite).map_err(RocksCacheError::from)?;
+        let res = self.db.get_cf(self.cf, kbuf.as_slice())?;
+        if let Some(inbuf) = res {
+            if ttl_expired(&inbuf[..])? {
+                return Ok(0);
+            }
+            let v: BTreeSet<T> = deserialize(&inbuf[HDR_LEN..]).map_err(RocksCacheError::from)?;
+            Ok(v.into_iter().filter(cb).count())
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn insert_if_greatest(&self, key: &K, item: &T) -> Result<(), RocksCacheError> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::AddIfGreatest(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
+        self.db
+            .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
+            .map_err(RocksCacheError::from)
+    }
+
+    pub fn remove_less_than(&self, key: &K, item: &T) -> Result<(), RocksCacheError> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::RemoveLess(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
+        self.db
+            .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
+            .map_err(RocksCacheError::from)
+    }
+
+    pub fn remove_greater_than(&self, key: &K, item: &T) -> Result<(), RocksCacheError> {
+        let kbuf = serialize(&key, Infinite)?;
+        let mut vbuf: Vec<u8> = Vec::with_capacity(32);
+        let op = vec![UnaryOps::RemoveGreater(item)];
+        serialize_into(&mut vbuf, &op, Infinite).map_err(RocksCacheError::from)?;
+        self.db
+            .merge_cf(self.cf, kbuf.as_slice(), vbuf.as_slice())
+            .map_err(RocksCacheError::from)
+    }
+
     pub fn delete(&self, key: &K) -> Result<(), RocksCacheError> {
         let kbuf = serialize(&key, Infinite)?;
         let opts = WriteOptions::default();
@@ -460,6 +514,16 @@ where
                 UnaryOps::Add(k) => {
                     result.insert(k);
                 }
+                UnaryOps::AddIfGreatest(k) => {
+                    let last = result.iter().last().map(|x| x.clone());
+                    if let Some(last) = last {
+                        if k > last {
+                            result.insert(k);
+                        }
+                    } else {
+                        result.insert(k);
+                    }
+                }
                 UnaryOps::Remove(ref k) => {
                     result.remove(k);
                 }
@@ -471,6 +535,12 @@ where
                     let set: BTreeSet<_> = vec.into_iter().collect();
                     let diff = result.difference(&set).cloned().collect();
                     result = diff;
+                }
+                UnaryOps::RemoveGreater(ref k) => {
+                    result = result.into_iter().filter(|x| x <= k).collect();
+                }
+                UnaryOps::RemoveLess(ref k) => {
+                    result = result.into_iter().filter(|x| x >= k).collect();
                 }
                 _ => debug!("Invalid op supplied to Set: {}", op),
             }
